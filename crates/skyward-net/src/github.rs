@@ -4,13 +4,13 @@
 use anyhow::{bail, ensure, Context, Result};
 use serde::Deserialize;
 
-/// The repository this fork's releases are published in. Upstream's own
-/// `Rinrroy/skyward-for-haotian` builds for many phones; this fork is the Xiaomi 15 Pro
-/// alone, so it looks at its own releases and nowhere else.
-pub const REPOSITORY: &str = "Rinrroy/skyward-for-haotian";
+/// The repository this fork's releases are published in. This fork is the
+/// Xiaomi 15 Ultra (xuanyuan) alone, so it looks at its own releases and
+/// nowhere else.
+pub const REPOSITORY: &str = "zhouzt0121/skyward";
 
 /// Where GitHub answers which release of this fork is the newest.
-pub const LATEST: &str = "https://api.github.com/repos/Rinrroy/skyward-for-haotian/releases/latest";
+pub const LATEST: &str = "https://api.github.com/repos/zhouzt0121/skyward/releases/latest";
 
 /// The version of GitHub's API the answer is read as.
 const API_VERSION: &str = "2022-11-28";

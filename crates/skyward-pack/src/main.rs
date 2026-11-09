@@ -302,9 +302,18 @@ const MTP_RC: &[u8] = include_bytes!("mtp.rc");
 /// The rest of what it loads, libbinder_ndk and below, is the stock
 /// recovery's own: a newer build of the interface libraries asks libbinder_ndk
 /// for symbols the stock one lacks.
-const OMAPI_FILES: [(&str, &str, u32); 2] = [
+const OMAPI_FILES: [(&str, &str, u32); 6] = [
     ("system/bin/se_omapi", "system/bin/se_omapi", 0o755),
     ("se_omapi.xml", "system/etc/vintf/manifest/se_omapi.xml", 0o644),
+    // The Thales weaver's own description: an odm that carries the weaver
+    // without one (the ColorOS port's) has the directory turn it away.
+    ("weaver-thales.xml", "system/etc/vintf/manifest/weaver-thales.xml", 0o644),
+    // se_omapi's two AIDL libraries, which the recovery does not carry; the
+    // copies are built for API 36 and patched to the recovery's API 35
+    // libbinder_ndk, with the one API 36 call answered by a no-op shim.
+    ("system/lib64/android.se.omapi-V1-ndk.so", "system/lib64/android.se.omapi-V1-ndk.so", 0o644),
+    ("system/lib64/android.hardware.secure_element-V1-ndk.so", "system/lib64/android.hardware.secure_element-V1-ndk.so", 0o644),
+    ("system/lib64/libbinder_ndk_shim36.so", "system/lib64/libbinder_ndk_shim36.so", 0o644),
 ];
 
 /// Put the OMAPI service and its description into `rd`, from the folder
@@ -314,11 +323,12 @@ const OMAPI_FILES: [(&str, &str, u32); 2] = [
 /// would answer to the same name, and the second to register would replace
 /// the first.
 fn install_omapi(rd: &mut Ramdisk, stage: &Path, read: &impl Fn(&PathBuf) -> Result<Vec<u8>>) -> Result<()> {
-    if rd.find(OMAPI_FILES[0].1).is_some() {
-        return Ok(());
-    }
     let at = |name: &str| stage.join(name.replace('/', std::path::MAIN_SEPARATOR_STR));
+    let stock_omapi = rd.find(OMAPI_FILES[0].1).is_some();
     for (from, to, mode) in OMAPI_FILES {
+        if rd.find(to).is_some() || (stock_omapi && !(from == "weaver-thales.xml" || from.starts_with("system/lib64/"))) {
+            continue;
+        }
         let bytes = read(&at(from)).with_context(|| format!("--omapi: {} is not in {}", from, stage.display()))?;
         rd.add(to, mode, bytes)?;
     }

@@ -1,11 +1,25 @@
 ![Skyward Recovery](assets/hero.jpg)
 
-# Skyward for Xiaomi 15 Pro
+# Skyward for Xiaomi 15 Ultra
 
 [English](README.md) | 简体中文
 
-Skyward 是使用 Rust 从零编写的 recovery。本仓库是为**一台手机**定制的分支：
-**小米 15 Pro（`haotian`）**，基于中国版系统 OS4.0.0.19。
+Skyward 是使用 Rust 从零编写的 recovery。本仓库是为**小米 15 Ultra（`xuanyuan`）**定制的分支，
+基于中国版系统 OS4.0.0.18.XOACNXM 的原厂 recovery，同时支持原厂 HyperOS 与 ColorOS 17 移植。
+本仓库 fork 自澪洛依（Rinrroy）的 [skyward-for-haotian](https://github.com/Rinrroy/skyward-for-haotian)，
+其上游为 Kirk Lin 的 [Skyward](https://github.com/kirklin/skyward)。
+
+相对 skyward-for-haotian，本分支新增：
+- xuanyuan 设备配置（`devices/xuanyuan.toml`）与 CI（`.github/workflows/build-xuanyuan.yml`）
+- Thales weaver 的 VINTF 声明与 se_omapi 所需 AIDL 库（取自 TWRP R7），ColorOS odm 下也能解密
+- 熄屏双击亮屏：经 `/dev/xiaomi-touch` 打开触控双击模式，KEY_WAKEUP 当电源键
+- 刷入 super.img（raw/sparse）与单个逻辑分区，读写并行
+- 禁用 AVB2.0，做法同 TWRP R7：只关两个槽位顶层 vbmeta 的 dm-verity，链式 vbmeta 保持 0
+- 震动失败不再导致重启；WLAN 只加载 qca_cld3_peach_v2
+- 应用内更新指向本仓库的 Release
+
+完整功能与刷入方法见 [docs/releases/v1.0.0.md](docs/releases/v1.0.0.md)。下文其余部分沿用上游分支的说明，
+其中关于小米 15 Pro 的段落仅供参考。
 
 <p align="center">
   <img src="assets/home.png" width="30%" alt="首页">
@@ -41,7 +55,7 @@ Skyward 是使用 Rust 从零编写的 recovery。本仓库是为**一台手机*
 - 刷机包的安装脚本可以使用 `avbctl` 关闭验证启动的校验，使用 `resetprop` 读写属性
 - 在线系统更新
 - Virtual A/B 更新：读取更新快照的状态，把分区映射到快照之上，再把快照合并回去
-- 从[本仓库](https://github.com/Rinrroy/skyward-for-haotian/releases)的最新版本在线更新 Skyward
+- 从[本仓库](https://github.com/zhouzt0121/skyward/releases)的最新版本在线更新 Skyward
 - 备份和恢复
 - 清除数据、恢复出厂设置
 - 挂载分区，修复和格式化文件系统
@@ -87,7 +101,7 @@ Skyward 是使用 Rust 从零编写的 recovery。本仓库是为**一台手机*
 ## 安装
 
 需要先解锁 bootloader。从
-[Releases](https://github.com/Rinrroy/skyward-for-haotian/releases) 下载镜像，
+[Releases](https://github.com/zhouzt0121/skyward/releases) 下载镜像，
 对照 `SHA256SUMS` 校验，然后在 fastboot 模式下把它刷到手机当前槽位的 recovery 分区：
 
 ```sh

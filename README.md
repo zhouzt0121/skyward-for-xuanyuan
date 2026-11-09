@@ -51,7 +51,7 @@ partition turned out to need:
 - Virtual A/B updates: read where an update's snapshots stand, map the
   partitions through them, and merge them back
 - Skyward's own updates, from the newest release in
-  [this repository](https://github.com/Rinrroy/skyward-for-haotian/releases)
+  [this repository](https://github.com/zhouzt0121/skyward/releases)
 - Backup and restore
 - Wipe data and factory reset
 - Mount partitions, repair and format filesystems
@@ -104,7 +104,7 @@ or `it is not running, even after the loader was asked again`.
 ## Installing
 
 Skyward needs an unlocked bootloader. Download the image from
-[Releases](https://github.com/Rinrroy/skyward-for-haotian/releases), check it
+[Releases](https://github.com/zhouzt0121/skyward/releases), check it
 against `SHA256SUMS`, and flash it to the recovery partition of the slot the
 phone runs from, with the phone in fastboot mode:
 
