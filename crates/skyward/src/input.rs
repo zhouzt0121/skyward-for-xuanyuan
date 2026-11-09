@@ -158,6 +158,9 @@ impl Panel {
                     self.was_down = self.down;
                     self.moved = false;
                 }
+                // A Xiaomi controller in its low-power gesture mode tells of
+                // a double tap on the dark panel as a wake-up key.
+                EventSummary::Key(_, KeyCode::KEY_WAKEUP, v) if v <= 1 => out.push(Event::Key(Key::Power, v == 1)),
                 _ if self.dropped => {}
                 EventSummary::AbsoluteAxis(_, AbsoluteAxisCode::ABS_MT_SLOT, v) => self.slot = v,
                 EventSummary::AbsoluteAxis(_, AbsoluteAxisCode::ABS_MT_TRACKING_ID, v) if self.slot == 0 => self.down = v >= 0,
@@ -176,6 +179,41 @@ impl Panel {
     }
 }
 
+const XIAOMI_TOUCH: &str = "/dev/xiaomi-touch";
+
+/// A request to Xiaomi's touch driver, as its own touch service sends one.
+#[repr(C)]
+struct XiaomiTouchRequest {
+    touch_id: u8,
+    cmd: u8,
+    mode: u16,
+    len: u16,
+    pad: u16,
+    data: [i32; 256],
+}
+
+/// Turn the controller's double tap with the panel off on or off through
+/// Xiaomi's touch driver: select touch 0 for this client, then set
+/// Touch_Doubletap_Mode (14). The driver keeps the controller in its
+/// low-power gesture mode while the panel is off, and reports a double tap
+/// as KEY_WAKEUP.
+fn xiaomi_double_tap(on: bool) -> Result<()> {
+    let dev = fs::OpenOptions::new().read(true).write(true).open(XIAOMI_TOUCH).with_context(|| format!("open {XIAOMI_TOUCH}"))?;
+    // _IO('T', 3): choose which touchscreen this client speaks for.
+    let select = (u32::from(b'T') << 8) | 3;
+    if unsafe { libc::ioctl(dev.as_raw_fd(), select as _, 0usize) } < 0 {
+        return Err(io::Error::last_os_error()).context("select touch 0");
+    }
+    let mut req = XiaomiTouchRequest { touch_id: 0, cmd: 0, mode: 14, len: 1, pad: 0, data: [0; 256] };
+    req.data[0] = i32::from(on);
+    // _IOW('T', 0, struct): set a mode's current value.
+    let set = (1u32 << 30) | ((std::mem::size_of::<XiaomiTouchRequest>() as u32) << 16) | (u32::from(b'T') << 8);
+    if unsafe { libc::ioctl(dev.as_raw_fd(), set as _, &mut req) } < 0 {
+        return Err(io::Error::last_os_error()).context("set Touch_Doubletap_Mode");
+    }
+    Ok(())
+}
+
 /// The touchscreen and the hardware buttons. /dev/input is watched, so a
 /// device that shows up later, such as a touch panel whose driver module
 /// loads after the UI starts, is picked up when it appears.
@@ -189,12 +227,15 @@ pub struct Inputs {
     seen: HashSet<PathBuf>,
     /// What the touchscreen is told each time its panel is taken in.
     touch_writes: Vec<Write>,
+    /// Whether the controller is asked to keep sensing double taps with
+    /// the panel off, where its driver takes that.
+    double_tap: bool,
     w: f32,
     h: f32,
 }
 
 impl Inputs {
-    pub fn open(w: u32, h: u32, touch_writes: Vec<Write>) -> Result<Self> {
+    pub fn open(w: u32, h: u32, touch_writes: Vec<Write>, double_tap: bool) -> Result<Self> {
         let fd = unsafe { libc::inotify_init1(libc::IN_NONBLOCK | libc::IN_CLOEXEC) };
         if fd < 0 {
             return Err(io::Error::last_os_error()).context("create inotify instance");
@@ -215,6 +256,7 @@ impl Inputs {
             buttons: Vec::new(),
             seen: HashSet::new(),
             touch_writes,
+            double_tap,
             w: w as f32,
             h: h as f32,
         };
@@ -246,6 +288,13 @@ impl Inputs {
                 for w in &self.touch_writes {
                     fs::write(&w.path, &w.value).with_context(|| format!("write {} to {}", w.value, w.path))?;
                     skyward_sys::kmsg(&format!("wrote {} to {} for the touchscreen", w.value, w.path))?;
+                }
+                if self.double_tap && std::path::Path::new(XIAOMI_TOUCH).exists() {
+                    let said = match xiaomi_double_tap(true) {
+                        Ok(()) => "double tap to wake turned on in the Xiaomi touch driver".to_string(),
+                        Err(e) => format!("double tap to wake not turned on: {e:#}"),
+                    };
+                    skyward_sys::kmsg(&said)?;
                 }
             } else if keys {
                 set_nonblocking(dev.as_raw_fd()).context("make buttons non-blocking")?;

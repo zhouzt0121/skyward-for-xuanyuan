@@ -1060,7 +1060,7 @@ fn detach(services: Vec<Service>) -> Detach {
 /// on a phone that has them, and checks a zip's signature before its
 /// install script runs.
 fn install_options(app: &App) -> Options {
-    Options { keep: app.state.keep_recovery && app.state.recovery_partitions, signed: app.state.check_signature }
+    Options { keep: app.state.keep_recovery && app.state.recovery_partitions, signed: app.state.check_signature, disable_avb: app.state.disable_avb }
 }
 
 /// How often the WLAN page scans while it shows.
@@ -1137,7 +1137,7 @@ pub fn run(cfg: &DeviceConfig, font: &Path, mono: &Path, request: bcb::Request, 
     // the pages come up: it says which subpixel block, if any, went out.
     let _ = skyward_sys::kmsg(&format!("the display is {}", surface.describe()));
     let (w, h) = surface.size();
-    let mut inputs = Inputs::open(w, h, cfg.touch.writes.clone())?;
+    let mut inputs = Inputs::open(w, h, cfg.touch.writes.clone(), cfg.touch.double_tap)?;
     let started = Instant::now();
     let mut touch_known = false;
     // adbd and fastbootd ask over it to go over to fastboot and back.
@@ -1516,14 +1516,14 @@ pub fn run(cfg: &DeviceConfig, font: &Path, mono: &Path, request: bcb::Request, 
             match fx {
                 Effect::Haptic => {
                     if let Some(h) = &mut haptics {
-                        h.click(app.state.vibration)?;
+                        if let Err(e) = h.click(app.state.vibration) { let _ = skyward_sys::kmsg(&format!("haptics: click failed, motor disabled: {e:#}")); haptics = None; }
                     }
                 }
                 // The power key held past its wait for volume down turns
                 // the screen off.
                 Effect::Ticks => {
                     if let Some(h) = &mut haptics {
-                        h.ticks()?;
+                        if let Err(e) = h.ticks() { let _ = skyward_sys::kmsg(&format!("haptics: ticks failed, motor disabled: {e:#}")); haptics = None; }
                     }
                 }
                 other => unreachable!("time passing asks for nothing but the motor, not {other:?}"),
@@ -2395,12 +2395,12 @@ pub fn run(cfg: &DeviceConfig, font: &Path, mono: &Path, request: bcb::Request, 
                     }
                     Effect::Haptic => {
                         if let Some(h) = &mut haptics {
-                            h.click(app.state.vibration)?;
+                            if let Err(e) = h.click(app.state.vibration) { let _ = skyward_sys::kmsg(&format!("haptics: click failed, motor disabled: {e:#}")); haptics = None; }
                         }
                     }
                     Effect::Ticks => {
                         if let Some(h) = &mut haptics {
-                            h.ticks()?;
+                            if let Err(e) = h.ticks() { let _ = skyward_sys::kmsg(&format!("haptics: ticks failed, motor disabled: {e:#}")); haptics = None; }
                         }
                     }
                     // The panel shows the last frame drawn, which is what is
@@ -2544,6 +2544,19 @@ pub fn run(cfg: &DeviceConfig, font: &Path, mono: &Path, request: bcb::Request, 
                                 None => app.report(&skyward_ui::fmt::rules_unread(app.state.lang, &format!("{e:#}")), now),
                             },
                         }
+                    }
+                    Effect::DisableAvb => {
+                        let results = skyward_install::avb::disable(std::path::Path::new(skyward_block::BY_NAME));
+                        let mut done = Vec::new();
+                        let mut failed = Vec::new();
+                        for (name, r) in results {
+                            skyward_sys::kmsg(&format!("disable AVB2.0 on {name}: {r:?}"))?;
+                            match r {
+                                Ok(_) => done.push(name),
+                                Err(e) => failed.push(format!("{name}: {e:#}")),
+                            }
+                        }
+                        app.avb_disabled(if failed.is_empty() { Ok(done) } else { Err(failed.join("; ")) }, now);
                     }
                     Effect::StopRelabel => relabeler.as_ref().context("there is no relabeling to stop")?.stop(),
                     // Partitions that cannot be read are the page's to say.

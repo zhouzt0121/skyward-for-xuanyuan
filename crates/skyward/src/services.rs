@@ -138,6 +138,9 @@ fn listen(socket: &skyward_config::InitSocket, known: &HashMap<String, u32>) -> 
     let fd = unsafe { OwnedFd::from_raw_fd(fd) };
     let path = Path::new("/dev/socket").join(&socket.name);
     fs::create_dir_all("/dev/socket").context("make /dev/socket")?;
+    // One left by a recovery that ended and was started again would
+    // refuse the bind; nothing listens on it any more.
+    let _ = fs::remove_file(&path);
     let address = socket_address(&path);
     if unsafe { libc::bind(fd.as_raw_fd(), (&address.0 as *const libc::sockaddr_un).cast(), address.1) } != 0 {
         return Err(io::Error::last_os_error()).with_context(|| format!("bind {}", path.display()));
