@@ -478,7 +478,7 @@ fn install<S>(ctx: &mut Context, mount: &Mount<S>, size: u64) -> Result<Done> {
     let file = File::open(mount.path()).context("open the package")?;
     let package = package::identify(BufReader::with_capacity(1 << 16, file))?;
     let _ = kmsg(&format!("install: {}", describe(&package)));
-    match package {
+    let done = match package {
         Package::Update(update) => update_system(ctx, mount, &update),
         // The system asks for packages that install themselves, as Android's
         // own recovery takes nothing else; an image needs someone to say
@@ -488,7 +488,14 @@ fn install<S>(ctx: &mut Context, mount: &Mount<S>, size: u64) -> Result<Done> {
         Package::Script => run_script(ctx, mount, size),
         Package::System(contents) => install_system(ctx, &contents),
         Package::Unknown => Ok(Done::Decided(Outcome::Refused(Refusal::Unknown))),
+    }?;
+    let worked = matches!(done, Done::Decided(Outcome::Flashed { .. } | Outcome::Installed { .. }) | Done::Script { code: 0, .. });
+    if worked && ctx.options.disable_avb {
+        for (name, result) in crate::avb::disable(Path::new(skyward_block::BY_NAME)) {
+            let _ = kmsg(&format!("install: disable AVB2.0 on {name}: {result:?}"));
+        }
     }
+    Ok(done)
 }
 
 /// Install the system in the package beside the installed one, once the
@@ -826,9 +833,15 @@ fn lines(from: impl Read, mut each: impl FnMut(&str) -> io::Result<()>) -> io::R
     }
 }
 
-fn flash_image<S>(ctx: &Context, mount: &Mount<S>, kind: ImageKind, size: u64) -> Result<Done> {
+fn flash_image<S>(ctx: &mut Context, mount: &Mount<S>, kind: ImageKind, size: u64) -> Result<Done> {
     let dir = Path::new(skyward_block::BY_NAME);
-    let partitions = image::partitions(kind, dir)?;
+    let partitions: Vec<&'static str> = match kind {
+        ImageKind::Logical { .. } => {
+            let slot = skyward_vab::current_slot()?.context("not an A/B phone")?;
+            skyward_vab::slot_bases(slot)?.into_iter().map(|b| &*Box::leak(b.into_boxed_str())).collect()
+        }
+        _ => image::partitions(kind, dir)?,
+    };
     if partitions.is_empty() {
         return Ok(Done::Decided(Outcome::Refused(Refusal::NoPartition)));
     }
@@ -839,6 +852,12 @@ fn flash_image<S>(ctx: &Context, mount: &Mount<S>, kind: ImageKind, size: u64) -
         Ok(other) => bail!("an image waiting for its partition was told {other:?}"),
     };
     ensure!(partitions.contains(&partition), "{partition} is not among {partitions:?}");
+    if let ImageKind::Super { sparse } = kind {
+        return flash_super(ctx, mount, partition, sparse, size);
+    }
+    if let ImageKind::Logical { sparse } = kind {
+        return flash_logical(ctx, mount, partition, &slots, sparse, size);
+    }
     ensure!(!slots.is_empty(), "no slot chosen for {partition}");
     if [skyward_systems::store::BOOT, skyward_systems::store::INIT_BOOT].contains(&partition) {
         installed_boot_set()?;
@@ -853,6 +872,100 @@ fn flash_image<S>(ctx: &Context, mount: &Mount<S>, kind: ImageKind, size: u64) -
         }
     })?;
     Ok(Done::Decided(Outcome::Flashed { partition, slots }))
+}
+
+/// Write a filesystem image to the logical partition `base` of each of
+/// `slots`, through a writable mapping of its own beside any the recovery
+/// uses. The partition keeps its size: an image that expands past it is
+/// refused, since growing it means rewriting super's metadata.
+fn flash_logical<S>(ctx: &mut Context, mount: &Mount<S>, base: &'static str, slots: &[Slot], sparse: bool, size: u64) -> Result<Done> {
+    ensure!(!slots.is_empty(), "no slot chosen for {base}");
+    if let Some(refusal) = short_of_charge(ctx.origin)? {
+        return Ok(Done::Decided(Outcome::Refused(refusal)));
+    }
+    let state = skyward_vab::snapshot_state()?;
+    if state != SnapshotState::None {
+        return Ok(Done::Decided(Outcome::Refused(Refusal::Pending(state))));
+    }
+    let mut file = BufReader::with_capacity(1 << 20, File::open(mount.path()).context("open the package")?);
+    let expanded = if sparse { image::sparse_size(&mut file)? } else { size };
+    let mut wholes = Vec::new();
+    for &slot in slots {
+        let name = format!("skyward-flash-{base}{}", slot.suffix());
+        let whole = skyward_vab::map_whole(slot, base, &name, false)?;
+        let fits = expanded <= whole.size;
+        let _ = kmsg(&format!("install: {base}{} is {} bytes, the image expands to {expanded}", slot.suffix(), whole.size));
+        wholes.push(whole);
+        if !fits {
+            for w in &wholes {
+                let _ = skyward_vab::unmap_whole(w);
+            }
+            bail!("the image expands to {expanded} bytes, more than the {} {base} holds; flash the whole super image instead", wholes.last().map_or(0, |w| w.size));
+        }
+    }
+    let mut told: Option<Instant> = None;
+    let mut progress = |done: u64, total: u64| {
+        if done == total || told.is_none_or(|t| t.elapsed() >= PROGRESS_EVERY) {
+            ctx.send(Event::Progress(Stage::Flashing { done, total }));
+            told = Some(Instant::now());
+        }
+    };
+    let result = (|| -> Result<()> {
+        if sparse {
+            for w in &wholes {
+                image::flash_sparse(&mut file, &w.device, &mut progress)?;
+            }
+        } else {
+            for w in &wholes {
+                image::flash(&mut file, size, std::slice::from_ref(&w.device), &mut progress)?;
+            }
+        }
+        Ok(())
+    })();
+    for w in &wholes {
+        if let Err(e) = skyward_vab::unmap_whole(w) {
+            let _ = kmsg(&format!("install: {} not unmapped: {e:#}", w.name));
+        }
+    }
+    result?;
+    Ok(Done::Decided(Outcome::Flashed { partition: base, slots: slots.to_vec() }))
+}
+
+/// Write a whole super image over the super partition: every slot's
+/// logical partitions at once. Nothing of either slot may be mounted from
+/// it, and no update may be in flight, as an update's snapshots live in it.
+fn flash_super<S>(ctx: &mut Context, mount: &Mount<S>, partition: &'static str, sparse: bool, size: u64) -> Result<Done> {
+    if let Some(refusal) = short_of_charge(ctx.origin)? {
+        return Ok(Done::Decided(Outcome::Refused(refusal)));
+    }
+    let state = skyward_vab::snapshot_state()?;
+    if state != SnapshotState::None {
+        return Ok(Done::Decided(Outcome::Refused(Refusal::Pending(state))));
+    }
+    detach_once(ctx)?;
+    for slot in [Slot::A, Slot::B] {
+        if let Err(e) = skyward_vab::unmount_partitions(slot) {
+            let _ = kmsg(&format!("install: slot {} partitions not all unmounted before super: {e:#}", slot.letter()));
+        }
+    }
+    let device = Path::new(skyward_block::BY_NAME).join(partition);
+    let _ = kmsg(&format!("install: writing a {} super image of {size} bytes to {}", if sparse { "sparse" } else { "raw" }, device.display()));
+    let mut file = BufReader::with_capacity(1 << 20, File::open(mount.path()).context("open the package")?);
+    let mut told: Option<Instant> = None;
+    let mut progress = |done: u64, total: u64| {
+        if done == total || told.is_none_or(|t| t.elapsed() >= PROGRESS_EVERY) {
+            ctx.send(Event::Progress(Stage::Flashing { done, total }));
+            told = Some(Instant::now());
+        }
+    };
+    if sparse {
+        image::flash_sparse(&mut file, &device, &mut progress)?;
+    } else {
+        image::flash(&mut file, size, &[device.clone()], &mut progress)?;
+    }
+    let _ = kmsg("install: super written and read back; reboot before using either slot");
+    let slot = skyward_vab::current_slot()?.context("not an A/B phone")?;
+    Ok(Done::Decided(Outcome::Flashed { partition, slots: vec![slot] }))
 }
 
 /// Run the install script of the zip being served, `size` bytes, once the

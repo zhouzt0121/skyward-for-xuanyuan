@@ -5,6 +5,7 @@
 
 pub mod adb;
 pub mod asked;
+pub mod avb;
 pub mod blockmap;
 pub mod commands;
 pub mod fuse;
@@ -68,6 +69,9 @@ pub struct Options {
     /// A zip with an install script runs only if it was signed with one of
     /// the keys the phone's updates are signed with.
     pub signed: bool,
+    /// Every vbmeta partition of both slots has verification disabled
+    /// after an install or a flash that worked.
+    pub disable_avb: bool,
 }
 
 /// What the installer tells the screen, in the order it happens.

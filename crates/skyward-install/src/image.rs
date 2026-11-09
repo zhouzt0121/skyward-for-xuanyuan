@@ -17,6 +17,15 @@ const VENDOR_BOOT_MAGIC: &[u8] = b"VNDRBOOT";
 /// A dtbo image starts with this, big-endian.
 const DTBO_MAGIC: &[u8] = &[0xd7, 0xb7, 0xab, 0x1e];
 const VBMETA_MAGIC: &[u8] = b"AVB0";
+/// An Android sparse image, as fastboot and ROM packages carry super.
+const SPARSE_MAGIC: &[u8] = &[0x3a, 0xff, 0x26, 0xed];
+/// The geometry of logical partitions, 4096 bytes into super.
+const LP_GEOMETRY_MAGIC: &[u8] = &[0x67, 0x44, 0x6c, 0x61];
+const LP_GEOMETRY_AT: u64 = 4096;
+const CHUNK_RAW: u16 = 0xcac1;
+const CHUNK_FILL: u16 = 0xcac2;
+const CHUNK_DONT_CARE: u16 = 0xcac3;
+const CHUNK_CRC32: u16 = 0xcac4;
 
 /// How a ramdisk is packed, by its first bytes: LZ4 in the legacy framing
 /// Android uses or the standard one, gzip, or a bare newc archive.
@@ -42,6 +51,12 @@ pub enum ImageKind {
     VendorBoot,
     Dtbo,
     Vbmeta,
+    /// The whole super partition, every slot's logical partitions in it,
+    /// raw or as a sparse image.
+    Super { sparse: bool },
+    /// A filesystem image (erofs, ext4, f2fs) for one of a slot's logical
+    /// partitions in super, raw or sparse.
+    Logical { sparse: bool },
 }
 
 /// The ramdisk a boot image carries.
@@ -67,7 +82,15 @@ impl ImageKind {
             ImageKind::VendorBoot => &["vendor_boot"],
             ImageKind::Dtbo => &["dtbo"],
             ImageKind::Vbmeta => &["vbmeta", "vbmeta_system", "vbmeta_vendor"],
+            ImageKind::Super { .. } => &["super"],
+            // Which ones there are is read from super as it is flashed.
+            ImageKind::Logical { .. } => &[],
         }
+    }
+
+    /// Whether the image goes to one partition that has no slots.
+    pub fn unslotted(self) -> bool {
+        matches!(self, ImageKind::Super { .. })
     }
 }
 
@@ -97,7 +120,224 @@ pub fn detect<R: Read + Seek>(file: &mut R, head: &[u8]) -> Result<Option<ImageK
     if head.starts_with(VBMETA_MAGIC) {
         return Ok(Some(ImageKind::Vbmeta));
     }
+    if head.starts_with(SPARSE_MAGIC) {
+        if sparse_bytes_at(file, LP_GEOMETRY_AT)?.is_some_and(|b| b == LP_GEOMETRY_MAGIC) {
+            return Ok(Some(ImageKind::Super { sparse: true }));
+        }
+        let fs = [(1024, EROFS_MAGIC), (1024, F2FS_MAGIC), (1080, EXT4_MAGIC)];
+        for (at, magic) in fs {
+            if let Some(b) = sparse_bytes_at(file, at)? {
+                if b[..magic.len()] == *magic {
+                    return Ok(Some(ImageKind::Logical { sparse: true }));
+                }
+            }
+        }
+        return Ok(None);
+    }
+    file.seek(SeekFrom::Start(LP_GEOMETRY_AT)).context("seek to the logical partition geometry")?;
+    let mut magic = [0u8; 4];
+    if file.read_exact(&mut magic).is_ok() && magic == LP_GEOMETRY_MAGIC {
+        return Ok(Some(ImageKind::Super { sparse: false }));
+    }
+    let mut at1024 = [0u8; 64];
+    file.seek(SeekFrom::Start(1024)).context("seek to the superblock")?;
+    if file.read_exact(&mut at1024).is_ok()
+        && (at1024.starts_with(EROFS_MAGIC) || at1024.starts_with(F2FS_MAGIC) || at1024[56..58] == *EXT4_MAGIC)
+    {
+        return Ok(Some(ImageKind::Logical { sparse: false }));
+    }
     Ok(None)
+}
+
+const EROFS_MAGIC: &[u8] = &[0xe2, 0xe1, 0xf5, 0xe0];
+const F2FS_MAGIC: &[u8] = &[0x10, 0x20, 0xf5, 0xf2];
+const EXT4_MAGIC: &[u8] = &[0x53, 0xef];
+
+/// A sparse image's header.
+#[derive(Debug, Clone, Copy)]
+struct SparseHeader {
+    file_hdr: u16,
+    chunk_hdr: u16,
+    block: u32,
+    blocks: u32,
+    chunks: u32,
+}
+
+fn le16(b: &[u8], at: usize) -> u16 {
+    u16::from_le_bytes([b[at], b[at + 1]])
+}
+fn le32(b: &[u8], at: usize) -> u32 {
+    u32::from_le_bytes([b[at], b[at + 1], b[at + 2], b[at + 3]])
+}
+
+fn sparse_header<R: Read + Seek>(file: &mut R) -> Result<SparseHeader> {
+    file.seek(SeekFrom::Start(0)).context("rewind the sparse image")?;
+    let mut h = [0u8; 28];
+    file.read_exact(&mut h).context("read the sparse header")?;
+    ensure!(h[..4] == *SPARSE_MAGIC, "not a sparse image");
+    ensure!(le16(&h, 4) == 1, "sparse image of major version {}", le16(&h, 4));
+    let header = SparseHeader { file_hdr: le16(&h, 8), chunk_hdr: le16(&h, 10), block: le32(&h, 12), blocks: le32(&h, 16), chunks: le32(&h, 20) };
+    ensure!(header.file_hdr >= 28 && header.chunk_hdr >= 12, "a sparse header too short");
+    ensure!(header.block > 0 && header.block % 4 == 0, "a sparse block size of {}", header.block);
+    Ok(header)
+}
+
+/// One chunk of a sparse image: its type, its length in output bytes, and
+/// where its data starts in the file and how long it is there.
+struct SparseChunk {
+    kind: u16,
+    out: u64,
+    data_at: u64,
+    data_len: u64,
+}
+
+fn sparse_chunks<R: Read + Seek>(file: &mut R, h: &SparseHeader) -> Result<Vec<SparseChunk>> {
+    let mut at = u64::from(h.file_hdr);
+    let mut chunks = Vec::with_capacity(h.chunks as usize);
+    let mut c = vec![0u8; h.chunk_hdr as usize];
+    let mut blocks = 0u64;
+    for _ in 0..h.chunks {
+        file.seek(SeekFrom::Start(at)).context("seek to a sparse chunk")?;
+        file.read_exact(&mut c).context("read a sparse chunk header")?;
+        let (kind, size, total) = (le16(&c, 0), u64::from(le32(&c, 4)), u64::from(le32(&c, 8)));
+        ensure!(total >= u64::from(h.chunk_hdr), "a sparse chunk shorter than its header");
+        let data_len = total - u64::from(h.chunk_hdr);
+        let out = size * u64::from(h.block);
+        match kind {
+            CHUNK_RAW => ensure!(data_len == out, "a raw chunk of {data_len} bytes for {out}"),
+            CHUNK_FILL => ensure!(data_len == 4, "a fill chunk of {data_len} bytes"),
+            CHUNK_DONT_CARE => {}
+            CHUNK_CRC32 => {}
+            other => bail!("a sparse chunk of unknown type {other:#x}"),
+        }
+        if kind != CHUNK_CRC32 {
+            blocks += size;
+        }
+        chunks.push(SparseChunk { kind, out: if kind == CHUNK_CRC32 { 0 } else { out }, data_at: at + u64::from(h.chunk_hdr), data_len });
+        at += total;
+    }
+    ensure!(blocks == u64::from(h.blocks), "sparse chunks cover {blocks} blocks of {}", h.blocks);
+    Ok(chunks)
+}
+
+/// The 4 bytes a sparse image expands to at `offset`; none where it leaves
+/// them alone.
+fn sparse_bytes_at<R: Read + Seek>(file: &mut R, offset: u64) -> Result<Option<[u8; 4]>> {
+    let h = match sparse_header(file) {
+        Ok(h) => h,
+        Err(_) => return Ok(None),
+    };
+    let chunks = match sparse_chunks(file, &h) {
+        Ok(c) => c,
+        Err(_) => return Ok(None),
+    };
+    let mut pos = 0u64;
+    for c in chunks {
+        if offset >= pos && offset + 4 <= pos + c.out {
+            let mut b = [0u8; 4];
+            match c.kind {
+                CHUNK_RAW => {
+                    file.seek(SeekFrom::Start(c.data_at + (offset - pos))).context("seek into a raw chunk")?;
+                    file.read_exact(&mut b).context("read a raw chunk")?;
+                }
+                CHUNK_FILL => {
+                    file.seek(SeekFrom::Start(c.data_at)).context("seek to a fill value")?;
+                    let mut v = [0u8; 4];
+                    file.read_exact(&mut v).context("read a fill value")?;
+                    for (k, x) in b.iter_mut().enumerate() {
+                        *x = v[((offset - pos) as usize + k) % 4];
+                    }
+                }
+                _ => return Ok(None),
+            }
+            return Ok(Some(b));
+        }
+        pos += c.out;
+    }
+    Ok(None)
+}
+
+/// The bytes a sparse image expands to.
+pub fn sparse_size<R: Read + Seek>(file: &mut R) -> Result<u64> {
+    let h = sparse_header(file)?;
+    Ok(u64::from(h.blocks) * u64::from(h.block))
+}
+
+/// Write a sparse image to `device`, block by block as its chunks say,
+/// leaving what it does not care about alone, then read back what it wrote
+/// and compare. `progress` hears the bytes written and read back so far.
+pub fn flash_sparse<R: Read + Seek>(image: &mut R, device: &Path, progress: &mut dyn FnMut(u64, u64)) -> Result<()> {
+    let h = sparse_header(image)?;
+    let chunks = sparse_chunks(image, &h)?;
+    let mut f = OpenOptions::new().read(true).write(true).open(device).with_context(|| format!("open {}", device.display()))?;
+    let size = f.seek(SeekFrom::End(0)).with_context(|| format!("find the size of {}", device.display()))?;
+    let expanded = u64::from(h.blocks) * u64::from(h.block);
+    ensure!(expanded <= size, "the image expands to {expanded} bytes, more than the {size} its partition holds");
+    let written: u64 = chunks.iter().filter(|c| matches!(c.kind, CHUNK_RAW | CHUNK_FILL)).map(|c| c.out).sum();
+    let verify = written <= VERIFY_UP_TO;
+    let total = if verify { written * 2 } else { written };
+    let mut done = 0u64;
+    let _ = size;
+    let mut buf = vec![0u8; BIG_CHUNK];
+    let mut sum = Sha256::new();
+    let mut pos = 0u64;
+    for c in &chunks {
+        match c.kind {
+            CHUNK_RAW | CHUNK_FILL => {
+                f.seek(SeekFrom::Start(pos)).with_context(|| format!("seek in {}", device.display()))?;
+                let mut fill = [0u8; 4];
+                if c.kind == CHUNK_FILL {
+                    image.seek(SeekFrom::Start(c.data_at)).context("seek to a fill value")?;
+                    image.read_exact(&mut fill).context("read a fill value")?;
+                    for k in 0..BIG_CHUNK {
+                        buf[k] = fill[k % 4];
+                    }
+                } else {
+                    image.seek(SeekFrom::Start(c.data_at)).context("seek to a raw chunk")?;
+                }
+                let mut left = c.out;
+                while left > 0 {
+                    let n = left.min(BIG_CHUNK as u64) as usize;
+                    if c.kind == CHUNK_RAW {
+                        image.read_exact(&mut buf[..n]).context("read the image")?;
+                    }
+                    if verify {
+                        sum.update(&buf[..n]);
+                    }
+                    f.write_all(&buf[..n]).with_context(|| format!("write {}", device.display()))?;
+                    left -= n as u64;
+                    done += n as u64;
+                    progress(done, total);
+                }
+            }
+            _ => {}
+        }
+        pos += c.out;
+    }
+    f.sync_all().with_context(|| format!("flush {}", device.display()))?;
+    drop_cache(&f).with_context(|| format!("drop the cached pages of {}", device.display()))?;
+    if !verify {
+        return Ok(());
+    }
+    let mut back = Sha256::new();
+    let mut pos = 0u64;
+    for c in &chunks {
+        if matches!(c.kind, CHUNK_RAW | CHUNK_FILL) {
+            f.seek(SeekFrom::Start(pos)).with_context(|| format!("seek in {}", device.display()))?;
+            let mut left = c.out;
+            while left > 0 {
+                let n = left.min(BIG_CHUNK as u64) as usize;
+                f.read_exact(&mut buf[..n]).with_context(|| format!("read back {}", device.display()))?;
+                back.update(&buf[..n]);
+                left -= n as u64;
+                done += n as u64;
+                progress(done, total);
+            }
+        }
+        pos += c.out;
+    }
+    ensure!(back.finalize() == sum.finalize(), "{} reads back different from what was written", device.display());
+    Ok(())
 }
 
 /// Whether a packed ramdisk is a recovery's, by the names in its archive.
@@ -182,6 +422,15 @@ pub fn device(dir: &Path, name: &str, slot: Slot) -> PathBuf {
 /// links in `dir`, the likeliest first.
 pub fn partitions(kind: ImageKind, dir: &Path) -> Result<Vec<&'static str>> {
     let mut found = Vec::new();
+    if kind.unslotted() {
+        for name in kind.partitions() {
+            let path = dir.join(name);
+            if path.try_exists().with_context(|| format!("look for {}", path.display()))? {
+                found.push(*name);
+            }
+        }
+        return Ok(found);
+    }
     for name in kind.partitions() {
         let mut has = true;
         for slot in [Slot::A, Slot::B] {
@@ -195,12 +444,56 @@ pub fn partitions(kind: ImageKind, dir: &Path) -> Result<Vec<&'static str>> {
     Ok(found)
 }
 
-/// Write `len` bytes of `image` to all of `devices` in one pass, then read
-/// each back and compare. A signed image smaller than its partition gets
-/// its footer moved to the partition's end, with zeros between, as
-/// fastboot does. `progress` hears the bytes written and read back so far,
-/// of all.
-pub fn flash<R: Read + Seek>(image: &mut R, len: u64, devices: &[PathBuf], progress: &mut dyn FnMut(u64, u64)) -> Result<()> {
+/// Images up to this size are read back and compared after writing; a
+/// larger one (super, a slot's system) is written once, as TWRP and
+/// fastboot write it, since reading back gigabytes doubles the wait.
+pub const VERIFY_UP_TO: u64 = 512 << 20;
+
+/// How much a write or a read moves at once, for the big images.
+const BIG_CHUNK: usize = 8 << 20;
+
+/// Read `end` bytes of `source` on a thread of its own, handing each
+/// chunk to `sink` as it comes, so reading the package and writing the
+/// partition overlap.
+fn pipelined<R: Read + Send>(source: &mut R, end: u64, chunk: usize, sink: &mut dyn FnMut(&[u8]) -> Result<()>) -> Result<()> {
+    use std::sync::mpsc;
+    std::thread::scope(|scope| -> Result<()> {
+        let (full_tx, full_rx) = mpsc::sync_channel::<Result<Vec<u8>>>(3);
+        let (empty_tx, empty_rx) = mpsc::channel::<Vec<u8>>();
+        for _ in 0..4 {
+            let _ = empty_tx.send(vec![0u8; chunk]);
+        }
+        scope.spawn(move || {
+            let mut at = 0u64;
+            while at < end {
+                let Ok(mut buf) = empty_rx.recv() else { return };
+                let n = (end - at).min(chunk as u64) as usize;
+                buf.resize(n, 0);
+                let r = source.read_exact(&mut buf).context("read the image");
+                let failed = r.is_err();
+                if full_tx.send(r.map(|_| buf)).is_err() || failed {
+                    return;
+                }
+                at += n as u64;
+            }
+        });
+        let mut at = 0u64;
+        while at < end {
+            let buf = full_rx.recv().context("the image reader stopped")??;
+            sink(&buf)?;
+            at += buf.len() as u64;
+            let _ = empty_tx.send(buf);
+        }
+        Ok(())
+    })
+}
+
+/// Write `len` bytes of `image` to all of `devices` in one pass, then,
+/// for an image no bigger than [`VERIFY_UP_TO`], read each back and
+/// compare. A signed image smaller than its partition gets its footer
+/// moved to the partition's end, with zeros between, as fastboot does.
+/// `progress` hears the bytes written and read back so far, of all.
+pub fn flash<R: Read + Seek + Send>(image: &mut R, len: u64, devices: &[PathBuf], progress: &mut dyn FnMut(u64, u64)) -> Result<()> {
     ensure!(!devices.is_empty(), "no partition to write");
     let mut outs = Vec::with_capacity(devices.len());
     for path in devices {
@@ -220,37 +513,41 @@ pub fn flash<R: Read + Seek>(image: &mut R, len: u64, devices: &[PathBuf], progr
         footer.starts_with(FOOTER_MAGIC)
     };
     image.seek(SeekFrom::Start(0)).context("rewind the image")?;
-    let (gap, tail): (u64, &[u8]) = if moved { (size - len - FOOTER_LEN, &footer) } else { (0, &[]) };
+    let (gap, tail): (u64, Vec<u8>) = if moved { (size - len - FOOTER_LEN, footer.to_vec()) } else { (0, Vec::new()) };
     let end = len + gap + tail.len() as u64;
-    let total = end * outs.len() as u64 * 2;
-    let mut source = image.take(len).chain(io::repeat(0).take(gap)).chain(tail);
+    let verify = end <= VERIFY_UP_TO;
+    let total = end * outs.len() as u64 * if verify { 2 } else { 1 };
+    let mut source = image.take(len).chain(io::repeat(0).take(gap)).chain(io::Cursor::new(tail));
+    let chunk = if verify { CHUNK } else { BIG_CHUNK };
 
-    let mut buf = vec![0u8; CHUNK];
     let mut written = Sha256::new();
     let mut done = 0;
-    let mut at = 0;
-    while at < end {
-        let n = (end - at).min(CHUNK as u64) as usize;
-        source.read_exact(&mut buf[..n]).context("read the image")?;
-        written.update(&buf[..n]);
-        for (path, f, _) in &mut outs {
-            f.write_all(&buf[..n]).with_context(|| format!("write {}", path.display()))?;
-            done += n as u64;
+    pipelined(&mut source, end, chunk, &mut |buf| {
+        if verify {
+            written.update(buf);
+        }
+        for (path, f, _) in outs.iter_mut() {
+            f.write_all(buf).with_context(|| format!("write {}", path.display()))?;
+            done += buf.len() as u64;
             progress(done, total);
         }
-        at += n as u64;
-    }
+        Ok(())
+    })?;
     let written = written.finalize();
     for (path, f, _) in &mut outs {
         f.sync_all().with_context(|| format!("flush {}", path.display()))?;
         drop_cache(f).with_context(|| format!("drop the cached pages of {}", path.display()))?;
     }
+    if !verify {
+        return Ok(());
+    }
+    let mut buf = vec![0u8; chunk];
     for (path, f, _) in &mut outs {
         f.seek(SeekFrom::Start(0)).with_context(|| format!("rewind {}", path.display()))?;
         let mut back = Sha256::new();
         let mut left = end;
         while left > 0 {
-            let n = left.min(CHUNK as u64) as usize;
+            let n = left.min(chunk as u64) as usize;
             f.read_exact(&mut buf[..n]).with_context(|| format!("read back {}", path.display()))?;
             back.update(&buf[..n]);
             left -= n as u64;
@@ -484,5 +781,72 @@ mod tests {
         let err = flash_all(&[1u8; 4097], &slots).unwrap_err();
         assert!(err.to_string().contains("4097"), "{err}");
         assert!(std::fs::read(&slots[0]).unwrap().iter().all(|&b| b == 0xaa));
+    }
+}
+
+#[cfg(test)]
+mod sparse_tests {
+    use super::*;
+    use std::io::Cursor;
+
+    fn sparse(chunks: &[(u16, u32, Vec<u8>)], block: u32) -> Vec<u8> {
+        let blocks: u32 = chunks.iter().filter(|c| c.0 != CHUNK_CRC32).map(|c| c.1).sum();
+        let mut v = Vec::new();
+        v.extend_from_slice(SPARSE_MAGIC);
+        v.extend_from_slice(&1u16.to_le_bytes());
+        v.extend_from_slice(&0u16.to_le_bytes());
+        v.extend_from_slice(&28u16.to_le_bytes());
+        v.extend_from_slice(&12u16.to_le_bytes());
+        v.extend_from_slice(&block.to_le_bytes());
+        v.extend_from_slice(&blocks.to_le_bytes());
+        v.extend_from_slice(&(chunks.len() as u32).to_le_bytes());
+        v.extend_from_slice(&0u32.to_le_bytes());
+        for (kind, n, data) in chunks {
+            v.extend_from_slice(&kind.to_le_bytes());
+            v.extend_from_slice(&0u16.to_le_bytes());
+            v.extend_from_slice(&n.to_le_bytes());
+            v.extend_from_slice(&(12 + data.len() as u32).to_le_bytes());
+            v.extend_from_slice(data);
+        }
+        v
+    }
+
+    #[test]
+    fn a_sparse_super_is_told_and_written_as_it_expands() {
+        let block = 4096u32;
+        let mut first = vec![0u8; 8192];
+        first[4096..4100].copy_from_slice(LP_GEOMETRY_MAGIC);
+        let img = sparse(&[(CHUNK_RAW, 2, first.clone()), (CHUNK_DONT_CARE, 1, vec![]), (CHUNK_FILL, 2, vec![0xab, 0xcd, 0xef, 0x01])], block);
+        let mut c = Cursor::new(img.clone());
+        assert_eq!(detect(&mut c, &img[..28]).unwrap(), Some(ImageKind::Super { sparse: true }));
+        assert_eq!(sparse_size(&mut c).unwrap(), 5 * 4096);
+        let dir = std::env::temp_dir().join(format!("sparse-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let dev = dir.join("super");
+        std::fs::write(&dev, vec![0x55u8; 6 * 4096]).unwrap();
+        flash_sparse(&mut c, &dev, &mut |_, _| {}).unwrap();
+        let out = std::fs::read(&dev).unwrap();
+        assert_eq!(&out[..8192], &first[..]);
+        assert!(out[8192..12288].iter().all(|&b| b == 0x55), "what it does not care about stays");
+        assert_eq!(&out[12288..12292], &[0xab, 0xcd, 0xef, 0x01]);
+        assert_eq!(&out[20476..20480], &[0xab, 0xcd, 0xef, 0x01]);
+        assert!(out[20480..].iter().all(|&b| b == 0x55));
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn filesystem_images_are_logical_partitions() {
+        let mut raw = vec![0u8; 8192];
+        raw[1024..1028].copy_from_slice(EROFS_MAGIC);
+        let mut c = Cursor::new(raw.clone());
+        assert_eq!(detect(&mut c, &raw[..4096]).unwrap(), Some(ImageKind::Logical { sparse: false }));
+        let mut ext = vec![0u8; 8192];
+        ext[1080..1082].copy_from_slice(EXT4_MAGIC);
+        let sp = sparse(&[(CHUNK_RAW, 2, ext)], 4096);
+        let mut c = Cursor::new(sp.clone());
+        assert_eq!(detect(&mut c, &sp[..28]).unwrap(), Some(ImageKind::Logical { sparse: true }));
+        let junk = vec![7u8; 8192];
+        let mut c = Cursor::new(junk.clone());
+        assert_eq!(detect(&mut c, &junk[..4096]).unwrap(), None);
     }
 }

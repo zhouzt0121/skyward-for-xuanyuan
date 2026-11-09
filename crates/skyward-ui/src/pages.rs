@@ -554,7 +554,7 @@ pub fn mount(cx: &Ctx) -> Frame {
 }
 
 /// Who made the recovery, as the About page names them under its version.
-const AUTHOR: &str = "© 2026 Kirk Lin & 澪洛依";
+const AUTHOR: &str = "© 2026 Kirk Lin & 大口吃饭";
 
 /// About this device, modelled on the stock「我的设备」: the wordmark, the
 /// version and its author over a moving colour field, and the summary,
@@ -1016,14 +1016,14 @@ pub fn install(cx: &Ctx) -> Frame {
     // A phone that can hold a second system installs one from here too.
     let what = l.pick(match cx.state.dual_boot {
         true => [
-            "支持安装 A/B 完整更新包、带安装脚本的刷机包和第二系统的安装包，以及刷入 boot、init_boot、vendor_boot、recovery、dtbo、vbmeta 分区镜像。系统更新将安装到另一个槽位，重启后从该槽位启动；第二系统安装在 data 分区中，可在「双系统」中切换。选择文件时仅列出文件夹以及 .zip、.img 文件。",
-            "支援安裝 A/B 完整更新檔、帶有安裝指令碼的刷機包和第二系統的安裝檔，以及刷入 boot、init_boot、vendor_boot、recovery、dtbo、vbmeta 分割區映像檔。系統更新將安裝到另一個槽位，重新啟動後從該槽位啟動；第二系統安裝在 data 分割區中，可在「雙系統」中切換。選擇檔案時僅列出資料夾以及 .zip、.img 檔案。",
-            "Installs A/B full OTA packages, flashable zips with an install script and second systems' packages, and flashes boot, init_boot, vendor_boot, recovery, dtbo and vbmeta partition images. A system update installs to the other slot, which starts after a reboot; a second system installs into the data partition, and Dual boot switches to it. Choosing a file lists only folders and .zip and .img files.",
+            "支持安装 A/B 完整更新包、带安装脚本的刷机包和第二系统的安装包，以及刷入 boot、init_boot、vendor_boot、recovery、dtbo、vbmeta、super 分区镜像。系统更新将安装到另一个槽位，重启后从该槽位启动；第二系统安装在 data 分区中，可在「双系统」中切换。选择文件时仅列出文件夹以及 .zip、.img 文件。",
+            "支援安裝 A/B 完整更新檔、帶有安裝指令碼的刷機包和第二系統的安裝檔，以及刷入 boot、init_boot、vendor_boot、recovery、dtbo、vbmeta、super 分割區映像檔。系統更新將安裝到另一個槽位，重新啟動後從該槽位啟動；第二系統安裝在 data 分割區中，可在「雙系統」中切換。選擇檔案時僅列出資料夾以及 .zip、.img 檔案。",
+            "Installs A/B full OTA packages, flashable zips with an install script and second systems' packages, and flashes boot, init_boot, vendor_boot, recovery, dtbo, vbmeta and super partition images. A system update installs to the other slot, which starts after a reboot; a second system installs into the data partition, and Dual boot switches to it. Choosing a file lists only folders and .zip and .img files.",
         ],
         false => [
-            "支持安装 A/B 完整更新包和带安装脚本的刷机包，以及刷入 boot、init_boot、vendor_boot、recovery、dtbo、vbmeta 分区镜像。系统更新将安装到另一个槽位，重启后从该槽位启动。选择文件时仅列出文件夹以及 .zip、.img 文件。",
-            "支援安裝 A/B 完整更新檔和帶有安裝指令碼的刷機包，以及刷入 boot、init_boot、vendor_boot、recovery、dtbo、vbmeta 分割區映像檔。系統更新將安裝到另一個槽位，重新啟動後從該槽位啟動。選擇檔案時僅列出資料夾以及 .zip、.img 檔案。",
-            "Installs A/B full OTA packages and flashable zips with an install script, and flashes boot, init_boot, vendor_boot, recovery, dtbo and vbmeta partition images. A system update installs to the other slot, which starts after a reboot. Choosing a file lists only folders and .zip and .img files.",
+            "支持安装 A/B 完整更新包和带安装脚本的刷机包，以及刷入 boot、init_boot、vendor_boot、recovery、dtbo、vbmeta、super 分区镜像。系统更新将安装到另一个槽位，重启后从该槽位启动。选择文件时仅列出文件夹以及 .zip、.img 文件。",
+            "支援安裝 A/B 完整更新檔和帶有安裝指令碼的刷機包，以及刷入 boot、init_boot、vendor_boot、recovery、dtbo、vbmeta、super 分割區映像檔。系統更新將安裝到另一個槽位，重新啟動後從該槽位啟動。選擇檔案時僅列出資料夾以及 .zip、.img 檔案。",
+            "Installs A/B full OTA packages and flashable zips with an install script, and flashes boot, init_boot, vendor_boot, recovery, dtbo, vbmeta and super partition images. A system update installs to the other slot, which starts after a reboot. Choosing a file lists only folders and .zip and .img files.",
         ],
     });
     let y = widgets::footnote(&mut c, t, f, methods.bottom, what);
@@ -1033,6 +1033,17 @@ pub fn install(cx: &Ctx) -> Frame {
     out.extend(hits(&signature.rows, &[Action::Toggle(Switch::Signature)]));
     let note = l.pick(["开启后，仅安装带有本机官方签名的刷机包。", "開啟後，僅安裝帶有本機官方簽章的刷機包。", "When on, only zips signed with this phone's official keys install."]);
     let mut y = widgets::footnote(&mut c, t, f, signature.bottom, note);
+    {
+        let row = Row::new(l.pick(["刷入后自动禁用 AVB2.0", "刷入後自動停用 AVB2.0", "Disable AVB2.0 after flashing"])).trail(Trail::Switch(cx.state.disable_avb));
+        let options = widgets::list(&mut c, t, f, y + t.m.card_gap, &[row]);
+        out.extend(hits(&options.rows, &[Action::Toggle(Switch::DisableAvb)]));
+        let note = l.pick([
+            "开启后，安装或刷入成功时将两个槽位的 vbmeta、vbmeta_system、vbmeta_vendor 标记为关闭验证，需已解锁 Bootloader。",
+            "開啟後，安裝或刷入成功時將兩個槽位的 vbmeta、vbmeta_system、vbmeta_vendor 標記為關閉驗證，需已解鎖 Bootloader。",
+            "When on, a successful install or flash marks vbmeta, vbmeta_system and vbmeta_vendor of both slots to skip verification. Needs an unlocked bootloader.",
+        ]);
+        y = widgets::footnote(&mut c, t, f, options.bottom, note);
+    }
     if cx.state.recovery_partitions {
         let row = Row::new(l.pick(["自动重新刷入 Skyward", "自動重新刷入 Skyward", "Flash Skyward again"])).trail(Trail::Switch(cx.state.keep_recovery));
         let options = widgets::list(&mut c, t, f, y + t.m.card_gap, &[row]);
@@ -1327,14 +1338,19 @@ pub fn installing(cx: &Ctx) -> Frame {
             let parts = widgets::list(&mut c, t, f, y, &rows);
             let choose: Vec<Action> = (0..choice.partitions.len()).map(Action::FlashPartition).collect();
             out.extend(hits(&parts.rows, &choose));
-            let y = widgets::section(&mut c, t, f, parts.bottom, l.pick(["槽位", "槽位", "Slot"]));
-            let titles = Pick::ALL.map(|p| pick_title(l, p, i.slot));
-            let rows: Vec<Row> =
-                Pick::ALL.iter().zip(&titles).map(|(p, title)| Row::new(title).trail(Trail::Check(*p == choice.pick))).collect();
-            let picks = widgets::list(&mut c, t, f, y, &rows);
-            out.extend(hits(&picks.rows, &Pick::ALL.map(Action::FlashSlots)));
+            let above = if choice.kind.unslotted() {
+                parts.bottom
+            } else {
+                let y = widgets::section(&mut c, t, f, parts.bottom, l.pick(["槽位", "槽位", "Slot"]));
+                let titles = Pick::ALL.map(|p| pick_title(l, p, i.slot));
+                let rows: Vec<Row> =
+                    Pick::ALL.iter().zip(&titles).map(|(p, title)| Row::new(title).trail(Trail::Check(*p == choice.pick))).collect();
+                let picks = widgets::list(&mut c, t, f, y, &rows);
+                out.extend(hits(&picks.rows, &Pick::ALL.map(Action::FlashSlots)));
+                picks.bottom
+            };
             let (label, danger) = confirm_label(Confirm::Flash, cx.state);
-            let track = widgets::confirm(&mut c, t, f, picks.bottom + t.m.dp(28.0), label, danger, s.confirm);
+            let track = widgets::confirm(&mut c, t, f, above + t.m.dp(28.0), label, danger, s.confirm);
             out.push(Hit { rect: track, action: Action::Confirm(Confirm::Flash) });
             let note = l.pick(match s.source {
                 Source::Computer => [
@@ -1604,7 +1620,11 @@ fn finished(
         }
         Outcome::Flashed { partition, slots } => {
             let slots = fmt::slots(l, slots);
-            let detail = tr!(l, "{partition} 已刷入{slots}。", "{partition} 已刷入{slots}。", "Flashed to {partition} in {slots}.");
+            let detail = if *partition == "super" {
+                l.pick(["super 已刷入，两个槽位的逻辑分区均已覆盖，请立即重启。", "super 已刷入，兩個槽位的邏輯分割區均已覆寫，請立即重新啟動。", "Super flashed over both slots' logical partitions. Reboot now."]).to_string()
+            } else {
+                tr!(l, "{partition} 已刷入{slots}。", "{partition} 已刷入{slots}。", "Flashed to {partition} in {slots}.")
+            };
             let y = widgets::list(c, t, f, top, &[standing(l.pick(["刷入成功", "刷入成功", "Flashed"]), GREEN, Icon::Install, &detail)]).bottom;
             let mut rows = vec![restart];
             let mut acts = vec![Action::RebootTo(Target::System)];
@@ -2310,6 +2330,7 @@ pub fn advanced(cx: &Ctx) -> Frame {
         Row::new(l.pick(FILES)).icon(BLUE, Icon::Folder),
         Row::new(l.pick(TERMINAL)).icon(SLATE, Icon::Terminal),
         Row::new(l.pick(RELABEL)).icon(PURPLE, Icon::Shield),
+        Row::new(l.pick(["禁用 AVB2.0", "停用 AVB2.0", "Disable AVB2.0"])).subtitle(l.pick(["关闭两个槽位 vbmeta 的 dm-verity（同 TWRP）", "關閉兩個槽位 vbmeta 的 dm-verity（同 TWRP）", "Turn off dm-verity in both slots' vbmeta, as TWRP does"])).icon(ORANGE, Icon::Shield),
         Row::new(l.pick(FILESYSTEMS)).icon(RED, Icon::Mount),
         Row::new(l.pick(LOGS)).icon(ORANGE, Icon::Log),
         Row::new(l.pick(UPDATE)).icon(GREEN, Icon::Layers).trail(Trail::Value(update_value(cx))),
@@ -2318,6 +2339,7 @@ pub fn advanced(cx: &Ctx) -> Frame {
         Action::Open(Screen::Files),
         Action::Open(Screen::Terminal),
         Action::Open(Screen::Relabel),
+        Action::DisableAvb,
         Action::Open(Screen::Filesystems),
         Action::Open(Screen::Logs),
         Action::Open(Screen::Update),
