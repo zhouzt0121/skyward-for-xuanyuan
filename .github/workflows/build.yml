@@ -1,0 +1,170 @@
+name: Build xuanyuan
+
+# The recovery for the Xiaomi 15 Ultra alone: run it by hand from the Actions
+# tab, or push to any branch to have it built. The image lands in the run's
+# artifacts as a zip, named for the build and the stock version it is made on.
+# A `v*` tag is a release: the same image is built, and published with its
+# checksum so that a phone can be flashed from a link that does not expire.
+on:
+  workflow_dispatch:
+  push:
+    branches: ["**"]
+    tags: ["v*"]
+    paths:
+      - "crates/**"
+      - "devices/xuanyuan.toml"
+      - "resources/fonts/**"
+      - "resources/omapi/**"
+      - ".github/workflows/build-xuanyuan.yml"
+      - "Cargo.toml"
+      - "Cargo.lock"
+      - "rust-toolchain.toml"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+  DEVICE: xuanyuan
+
+jobs:
+  test:
+    name: Test on the computer
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: ./.github/actions/setup
+
+      # What can be read and decided on a computer is tested here: the
+      # readers of what the phone keeps, among them which of a user's blobs
+      # to open. The phone's own code is not built for this host.
+      - name: Run the tests
+        run: cargo test --workspace --locked
+
+      - name: Lint
+        run: cargo clippy --workspace --all-targets --locked -- -D warnings
+
+  build:
+    name: Build the recovery
+    runs-on: ubuntu-24.04
+    # A tag publishes a release, which is a write to the repository; a branch
+    # only leaves an artifact and needs no more than to read it.
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+
+      # The toolchain rust-toolchain.toml names, the NDK and cargo-ndk, set
+      # up as the repository's own action does it.
+      - uses: ./.github/actions/setup
+
+      # Two targets are built: the recovery service for the phone, and the
+      # packer, which runs here and puts the service into the stock image.
+      # The setup action left ANDROID_NDK_HOME set for cargo-ndk.
+      - name: Build the recovery service for the phone
+        run: cargo ndk -t arm64-v8a --platform 30 build --locked --release -p skyward
+
+      # It runs as a second system's first program, before any library is
+      # there to load, so it is linked statically and packed with the image.
+      - name: Build the second system's first program, static
+        env:
+          RUSTFLAGS: -C target-feature=+crt-static
+        run: cargo ndk -t arm64-v8a --platform 30 build --locked --release -p skyward-system-init -p skyward-permissive-init --target-dir target/system-init
+
+      - name: Build the packer
+        run: cargo build --locked --release -p skyward-pack
+
+      # The packer says which stock build the recovery is made on, and reads
+      # that build's recovery partition out of the full update package on the
+      # phone maker's server. Only the part of the package the partition is in
+      # is read, not the several gigabytes in all.
+      - name: Read the stock build the recovery is made on
+        id: stock
+        run: target/release/skyward-pack stock --config "devices/$DEVICE.toml" >> "$GITHUB_OUTPUT"
+
+      - name: Cache the stock recovery
+        id: cache
+        uses: actions/cache@v4
+        with:
+          path: stock/recovery.img
+          key: stock-recovery-${{ env.DEVICE }}-${{ steps.stock.outputs.recovery }}
+
+      - name: Take the recovery partition out of the stock package
+        if: steps.cache.outputs.cache-hit != 'true'
+        run: target/release/skyward-pack stock --config "devices/$DEVICE.toml" --out stock/recovery.img
+
+      - name: Check the stock recovery
+        env:
+          RECOVERY: ${{ steps.stock.outputs.recovery }}
+        run: echo "$RECOVERY  stock/recovery.img" | sha256sum --check
+
+      # The image is named for the build, the phone and the stock version it
+      # is made on, as the releases name theirs; on a tag that is the tag.
+      - name: Pack the recovery
+        id: pack
+        env:
+          STOCK: ${{ steps.stock.outputs.version }}
+        run: |
+          if [ "$GITHUB_REF_TYPE" = tag ]; then version="$GITHUB_REF_NAME"; else version="${GITHUB_SHA::7}"; fi
+          name="skyward-$version-$DEVICE-$STOCK"
+          mkdir out
+          target/release/skyward-pack recovery \
+            --stock stock/recovery.img \
+            --binary target/aarch64-linux-android/release/skyward \
+            --system-init target/system-init/aarch64-linux-android/release/system-init \
+            --permissive-init target/system-init/aarch64-linux-android/release/permissive-init \
+            --config "devices/$DEVICE.toml" \
+            --font resources/fonts/MiSansVF.ttf \
+            --mono resources/fonts/KirkMono-Regular.ttf \
+            --mono-license resources/fonts/KirkMono-OFL.txt \
+            --omapi resources/omapi \
+            --out "out/$name.img"
+          echo "name=$name" >> "$GITHUB_OUTPUT"
+
+      # Upload the image itself. upload-artifact compresses it once; zipping
+      # here first would hand out a zip containing another zip.
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{ steps.pack.outputs.name }}
+          path: out/${{ steps.pack.outputs.name }}.img
+          if-no-files-found: error
+          retention-days: 30
+
+      # A release is a tag. The artifact above is deleted after thirty days; a
+      # release is where a phone is flashed from a year later, so the image is
+      # published with a checksum beside it. The notes are the file the tag
+      # names where there is one, and the commits since the last release where
+      # there is not.
+      - name: Checksum the image
+        id: release
+        if: github.ref_type == 'tag'
+        run: |
+          set -eu
+          name="${{ steps.pack.outputs.name }}"
+          cd out
+          sha256sum "$name.img" > SHA256SUMS
+          cat SHA256SUMS
+          echo "notes=docs/releases/$GITHUB_REF_NAME.md" >> "$GITHUB_OUTPUT"
+
+      - name: Publish the release
+        if: github.ref_type == 'tag'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -eu
+          name="${{ steps.pack.outputs.name }}"
+          title="Skyward $GITHUB_REF_NAME for $DEVICE (Xiaomi 15 Ultra)"
+          if [ -f "docs/releases/$GITHUB_REF_NAME.md" ]; then
+            gh release create "$GITHUB_REF_NAME" "out/$name.img" out/SHA256SUMS \
+              --title "$title" --notes-file "docs/releases/$GITHUB_REF_NAME.md"
+          else
+            gh release create "$GITHUB_REF_NAME" "out/$name.img" out/SHA256SUMS \
+              --title "$title" --generate-notes
+          fi
+
+# CI re-run: build the reset commits on xuanyuan-0.3.
