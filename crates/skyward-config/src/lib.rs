@@ -21,9 +21,6 @@ pub mod ramdisk {
     /// which Skyward puts in that system's init_boot image: linked
     /// statically, since it runs before any system's libraries are there.
     pub const SYSTEM_INIT: &str = "skyward/system-init";
-    /// The first program the permissive kernel puts in an init_boot
-    /// ramdisk, ahead of the ramdisk's own: linked statically too.
-    pub const PERMISSIVE_INIT: &str = "skyward/permissive-init";
     /// The commands install scripts written for other recoveries run that
     /// Skyward answers itself: 7za, avbctl, resetprop and zstd, which a
     /// stock recovery does not carry, and unzip, whose stock version holds
@@ -64,10 +61,6 @@ pub struct DeviceConfig {
     /// The vibration motor's click, on phones that have one.
     #[serde(default)]
     pub haptics: Option<Haptics>,
-    /// The panel's own doze, on phones whose display driver offers one: what
-    /// keeps a little on the glass with the backlight out.
-    #[serde(default)]
-    pub aod: Option<Aod>,
     /// The recovery's own logd, on phones whose recovery leaves out
     /// libraries it needs.
     #[serde(default)]
@@ -219,83 +212,9 @@ pub struct Haptics {
     #[serde(default)]
     pub click: Option<i16>,
     /// The file the driver says the motor's resonant frequency in, in
-    /// The file the motor's driver says its resonant frequency in, in
-    /// tenths of a hertz whatever its label, on phones whose click is made
-    /// for the motor's own frequency. A driver that says it nowhere, as
-    /// Cirrus Logic's CS40L26 does not, takes a click made at the nominal
-    /// frequency instead, which is why this may be left out.
-    #[serde(default)]
-    pub resonance: Option<String>,
-    /// The kernel modules the motor's driver is in, which the recovery loads
-    /// as it brings the motor up: a motor whose driver the phone's own
-    /// recovery leaves out makes no force-feedback device until it is.
-    #[serde(default)]
-    pub modules: Vec<String>,
-    /// Firmware files the driver asks the kernel's loader for, which the
-    /// phone's own recovery keeps out of its reach: a motor driver that ends
-    /// its probe for want of one makes no force-feedback device either.
-    #[serde(default)]
-    pub firmware: Vec<Firmware>,
+    /// tenths of a hertz whatever its label.
+    pub resonance: String,
     pub strength: Strength,
-}
-
-/// The panel's own doze: what the display driver is told to keep a little of
-/// the panel alight with the backlight out, as the stock system keeps its
-/// always-on display on these phones. The driver is Xiaomi's `mi_disp`, which
-/// lives inside `msm_drm` — the same module that drives the pages.
-///
-/// A panel is put into its doze by sending it one of its own command sets and
-/// taken out of it by sending others, through the node the driver writes a
-/// set's number to; the panel stays dark to the rest of the system either
-/// way, its backlight at 0. What glows is decided by the frame, not by the
-/// light: an OLED lights the subpixels the framebuffer lights, so the pages
-/// draw black but for the clock.
-#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
-pub struct Aod {
-    /// The display driver's folder for the panel: it holds the node that
-    /// lists the driver's features, and one node per feature.
-    #[serde(default = "default_aod_dir")]
-    pub dir: String,
-    /// The node a command set's number is written to, which has the driver
-    /// send that set to the panel.
-    #[serde(default = "default_aod_node")]
-    pub node: String,
-    /// The driver's features written as the panel goes into its doze, each by
-    /// the number `disp_param` gives it: a feature the driver does not list
-    /// is left alone rather than written blind.
-    #[serde(default)]
-    pub enter: Vec<Feature>,
-    /// The command sets sent as it goes in, by the number the node's own
-    /// listing gives each.
-    #[serde(default)]
-    pub enter_cmds: Vec<u32>,
-    /// The features written as it comes back out.
-    #[serde(default)]
-    pub leave: Vec<Feature>,
-    /// The command sets sent as it comes back out.
-    #[serde(default)]
-    pub leave_cmds: Vec<u32>,
-}
-
-/// One of the display driver's features, as `disp_param` lists it: the number
-/// it gives the feature in brackets after its name, and the value to write.
-/// The driver's own folder carries a node for each feature it lets be
-/// written, named as the listing names it.
-#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
-pub struct Feature {
-    /// The number in brackets after the feature's name: `doze_brightness` is
-    /// `[03]`, `apl_dimming` is `[36]`. The driver counts them in hex.
-    pub id: u32,
-    /// What is written to the feature's node, as text.
-    pub value: String,
-}
-
-fn default_aod_dir() -> String {
-    "/sys/class/mi_display/disp-DSI-0".into()
-}
-
-fn default_aod_node() -> String {
-    "/proc/mi_display/tx_cmd_set_prim".into()
 }
 
 /// How strongly the click plays, each as a share of the most its waveform
@@ -369,16 +288,6 @@ pub struct Display {
     /// sliding over another rounds its leading corners to it.
     #[serde(default)]
     pub corner_radius: u32,
-    /// Whether the panel is switched to its fastest refresh once it is up.
-    ///
-    /// Off unless a phone asks for it. A recovery's pages are mostly still,
-    /// and 60 Hz draws the moving ones quite well enough; the switch to the
-    /// faster mode is a modeset the panel and the display controller both pay
-    /// for, in power and in the frames it takes to settle. A phone whose
-    /// panel is its own thing to drive, and whose config says so, still gets
-    /// it.
-    #[serde(default)]
-    pub fastest_refresh: bool,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -408,13 +317,6 @@ pub struct Touch {
     /// step of starting the controller.
     #[serde(default)]
     pub writes: Vec<Write>,
-    /// Whether two taps on the dark panel light it, as the phone's own
-    /// system's double tap does. A phone whose panel goes dark but whose
-    /// controller keeps reporting taps is one this is worth setting on: the
-    /// recovery then keeps the phone awake while the panel is off, since a
-    /// suspended phone is one the touchscreen cannot report a tap to.
-    #[serde(default)]
-    pub double_tap: bool,
 }
 
 /// Partitions as the phone itself mounts them.
@@ -458,11 +360,6 @@ pub struct Service {
     /// directory takes only when they are described to it as well.
     #[serde(default)]
     pub registers: Vec<String>,
-    /// The file that describes what the program registers, where the phone
-    /// keeps that file apart from its other descriptions, as one its init
-    /// puts in place of another on some builds of the hardware.
-    #[serde(default)]
-    pub description: Option<String>,
     /// A service the program registers with the other directory, the one
     /// the phone's hardware services of the older kind use. It is written
     /// as the interface and then which of them it is.
@@ -488,22 +385,6 @@ pub struct Service {
     /// names it: it keeps these alone, through its change of user.
     #[serde(default)]
     pub capabilities: Vec<String>,
-    /// Listening sockets init would make for the program and pass in
-    /// ANDROID_SOCKET_<name>. A program that opens its listener by that name
-    /// cannot start without it, as Qualcomm's hlosminkdaemon does.
-    #[serde(default)]
-    pub sockets: Vec<InitSocket>,
-}
-
-/// A listening socket a phone's own init passes to a service. `kind` is
-/// "stream", "dgram" or "seqpacket", as in an init socket line.
-#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
-pub struct InitSocket {
-    pub name: String,
-    pub kind: String,
-    pub mode: u32,
-    pub user: String,
-    pub group: String,
 }
 
 /// The kernel's capabilities, by the names init's capabilities lines give
@@ -621,7 +502,7 @@ impl DeviceConfig {
             let path = Path::new(log);
             let plain = path.components().all(|c| matches!(c, std::path::Component::RootDir | std::path::Component::Normal(_)));
             ensure!(
-                path.has_root() && plain && path.starts_with(DATA) && path != Path::new(DATA),
+                path.is_absolute() && plain && path.starts_with(DATA) && path != Path::new(DATA),
                 "[wipe] logs: {log} is not a folder inside {DATA}"
             );
         }
@@ -638,7 +519,7 @@ impl DeviceConfig {
         for s in cfg.services.iter().filter(|s| s.oneshot) {
             let waits = s.ready_property.is_some() || s.ready_service.is_some() || s.ready_hardware_service.is_some();
             ensure!(
-                !waits && s.registers.is_empty() && s.description.is_none(),
+                !waits && s.registers.is_empty(),
                 "[[service]] {}: a program run once is ready when it ends, and registers nothing",
                 s.path
             );
@@ -651,63 +532,26 @@ impl DeviceConfig {
             for name in &s.capabilities {
                 ensure!(capability(name).is_some(), "[[service]] {}: {name} is not a capability init knows", s.path);
             }
-            for socket in &s.sockets {
-                ensure!(!socket.name.is_empty() && !socket.name.contains('/'), "[[service]] {}: a socket needs a plain name", s.path);
-                ensure!(matches!(socket.kind.as_str(), "stream" | "dgram" | "seqpacket"), "[[service]] {}: {} is not a socket kind", s.path, socket.kind);
-                ensure!(socket.mode <= 0o7777, "[[service]] {}: socket mode {:o} is not a file mode", s.path, socket.mode);
-                ensure!(!socket.user.is_empty() && !socket.group.is_empty(), "[[service]] {}: a socket needs its user and group", s.path);
-            }
         }
         for folder in &cfg.backup.data_skipped {
             let path = Path::new(folder);
             let plain = path.components().all(|c| matches!(c, std::path::Component::Normal(_)));
             ensure!(plain && !folder.is_empty(), "[backup] data_skipped: {folder} is not a path from the top of {DATA}");
         }
-        if let Some(aod) = &cfg.aod {
-            for path in [&aod.dir, &aod.node] {
-                ensure!(Path::new(path).has_root(), "[aod] {path} is not an absolute path");
-            }
-            ensure!(!aod.enter_cmds.is_empty(), "[aod] enter_cmds names no command set that puts the panel into its doze");
-            ensure!(!aod.leave_cmds.is_empty(), "[aod] leave_cmds names no command set that brings the panel back out");
-        }
         if let Some(haptics) = &cfg.haptics {
-            // A click is either a waveform the driver keeps or one made at
-            // the motor's own frequency, and a phone may name the frequency
-            // beside a kept waveform too, for the ticks the screen going off
-            // plays. A driver that says its motor's frequency nowhere, as
-            // Cirrus Logic's CS40L26 does not, names neither and takes a
-            // click made at the nominal frequency.
-            if let Some(file) = &haptics.resonance {
-                ensure!(Path::new(file).has_root(), "[haptics] resonance: {file} is not an absolute path");
-            }
+            let file = &haptics.resonance;
+            ensure!(Path::new(file).is_absolute(), "[haptics] resonance: {file} is not an absolute path");
             let Strength { lightest, strongest } = haptics.strength;
             ensure!(
                 0.0 < lightest && lightest < strongest && strongest <= 1.0,
                 "[haptics] strength: {lightest} and {strongest} are not shares rising from above 0 to at most 1"
             );
-            for name in &haptics.modules {
-                ensure!(!name.is_empty() && !name.contains('/') && !name.ends_with(".ko"), "[haptics] modules: {name} is not a module's name");
-            }
-            for file in &haptics.firmware {
-                ensure!(
-                    !file.name.is_empty() && !file.name.starts_with('/') && !file.name.contains(".."),
-                    "[haptics] firmware: {} is not a name from the loader's folders",
-                    file.name
-                );
-                ensure!(!file.path.is_empty(), "[haptics] firmware: {} names no file", file.name);
-                if let Some(partition) = &file.partition {
-                    ensure!(
-                        !partition.is_empty() && !partition.contains('/'),
-                        "[haptics] firmware: {partition} is not a partition's name"
-                    );
-                }
-            }
         }
         if let Some(logd) = &cfg.logd {
             for library in &logd.libraries {
                 let path = Path::new(library);
                 let plain = path.components().all(|c| matches!(c, std::path::Component::RootDir | std::path::Component::Normal(_)));
-                ensure!(path.has_root() && plain && path.file_name().is_some(), "[logd] libraries: {library} is not an absolute path to a file");
+                ensure!(path.is_absolute() && plain && path.file_name().is_some(), "[logd] libraries: {library} is not an absolute path to a file");
             }
         }
         for owners in &cfg.owners {
@@ -719,7 +563,7 @@ impl DeviceConfig {
             for file in &owners.paths {
                 let path = Path::new(file);
                 let plain = path.components().all(|c| matches!(c, std::path::Component::RootDir | std::path::Component::Normal(_)));
-                ensure!(path.has_root() && plain && path.file_name().is_some(), "[[owners]] paths: {file} is not an absolute path to a file");
+                ensure!(path.is_absolute() && plain && path.file_name().is_some(), "[[owners]] paths: {file} is not an absolute path to a file");
             }
         }
         if let Some(stock) = &cfg.stock {
@@ -752,7 +596,7 @@ impl DeviceConfig {
                         );
                         ensure!(plain && !file.path.is_empty(), "[wlan] firmware: {} is not a path from the top of {partition}", file.path);
                     }
-                    None => ensure!(path.has_root(), "[wlan] firmware: {} is not an absolute path", file.path),
+                    None => ensure!(path.is_absolute(), "[wlan] firmware: {} is not an absolute path", file.path),
                 }
             }
         }
@@ -785,68 +629,35 @@ mod tests {
     }
 
     #[test]
-    fn a_phone_gives_its_logd_the_libraries_its_recovery_leaves_out() {
-        let cfg = DeviceConfig::parse(include_str!("../../../devices/haotian.toml")).unwrap();
-        let logd = cfg.logd.expect("haotian's recovery leaves out what its logd loads");
+    fn nezha_gives_its_logd_the_libraries_its_recovery_leaves_out() {
+        let cfg = DeviceConfig::parse(include_str!("../../../devices/nezha.toml")).unwrap();
+        let logd = cfg.logd.expect("the 17 Ultra's recovery leaves out what its logd loads");
         assert_eq!(logd.libraries, ["/mnt/system/system/lib64/libsysutils.so", "/mnt/system/system/lib64/libcap.so"]);
-        // A phone whose recovery carries both names none, and has no logd of
-        // its own started for it.
-        let bare = DeviceConfig::parse("[device]\ncodename = \"x\"\n").unwrap();
-        assert_eq!(bare.logd, None);
+        let ishtar = DeviceConfig::parse(include_str!("../../../devices/ishtar.toml")).unwrap();
+        assert_eq!(ishtar.logd, None, "the 13 Ultra's recovery carries both");
     }
 
     #[test]
-    fn haotian_clicks_at_the_frequency_its_motor_swings_at() {
-        let cfg = DeviceConfig::parse(include_str!("../../../devices/haotian.toml")).unwrap();
-        let haptics = cfg.haptics.expect("haotian has a motor");
-        // The CS40L26 says its frequency nowhere, so the click is made at the
-        // nominal one rather than played from a waveform kept by the driver.
-        assert_eq!((haptics.click, haptics.resonance.as_deref()), (None, Some("/sys/bus/i2c/devices/0-0043/input/input6/calibration/f0_stored")));
-        assert_eq!(haptics.strength, Strength { lightest: 0.25, strongest: 0.75 });
+    fn ishtar_clicks_with_a_waveform_its_driver_keeps() {
+        let cfg = DeviceConfig::parse(include_str!("../../../devices/ishtar.toml")).unwrap();
+        let haptics = cfg.haptics.expect("the 13 Ultra has a motor");
+        assert_eq!((haptics.click, haptics.resonance.as_str()), (Some(0), "/sys/class/qcom-haptics/lra_frequency_hz"));
+        assert_eq!(haptics.strength, Strength { lightest: 0.5, strongest: 1.0 });
     }
 
     #[test]
     fn a_click_is_kept_or_made_and_its_strengths_rise() {
         let with = |body: &str| DeviceConfig::parse(&format!("[device]\ncodename = \"x\"\n[haptics]\n{body}\n"));
         let (strength, resonance) = ("strength = { lightest = 0.25, strongest = 1.0 }", "resonance = \"/sys/class/qcom-haptics/lra_frequency_hz\"");
-        assert!(with(&format!("click = 0\n{strength}")).is_ok());
-        assert!(with(&format!("resonance = \"/sys/class/qcom-haptics/lra_frequency_hz\"\n{strength}")).is_ok());
-        assert!(with(strength).is_ok(), "a driver that keeps neither takes a made click at a nominal frequency");
-        assert!(with(&format!("click = 0\nresonance = \"/sys/f\"\n{strength}")).is_ok(), "a kept click beside the frequency its ticks are made at");
+        assert!(with(&format!("{resonance}\n{strength}")).is_ok(), "a click made");
+        assert!(with(&format!("click = 0\n{resonance}\n{strength}")).is_ok(), "a click kept");
+        assert!(with(&format!("click = 0\n{strength}")).is_err(), "no motor's resonance to make the ticks at");
         assert!(with(&format!("resonance = \"sys/f\"\n{strength}")).is_err(), "a file named from nowhere");
         assert!(with(resonance).is_err(), "a click without its strengths");
         for (lightest, strongest) in [(0.0, 0.5), (0.5, 0.5), (0.5, 0.25), (0.25, 1.5)] {
             let s = format!("{resonance}\nstrength = {{ lightest = {lightest:?}, strongest = {strongest:?} }}");
             assert!(with(&s).is_err(), "{lightest} to {strongest} is refused");
         }
-    }
-
-    #[test]
-    fn a_service_socket_is_named_as_init_names_it() {
-        let text = "[device]\ncodename = \"x\"\n[[service]]\npath = \"/vendor/bin/daemon\"\nsockets = [{ name = \"hlos_mink_opener\", kind = \"stream\", mode = 0o660, user = \"system\", group = \"system\" }]\n";
-        let cfg = DeviceConfig::parse(text).unwrap();
-        assert_eq!(cfg.services[0].sockets[0].name, "hlos_mink_opener");
-        assert_eq!(cfg.services[0].sockets[0].mode, 0o660);
-        assert!(DeviceConfig::parse(&text.replace("kind = \"stream\"", "kind = \"unknown\"")).is_err());
-        assert!(DeviceConfig::parse(&text.replace("name = \"hlos_mink_opener\"", "name = \"/dev/bad\"")).is_err());
-    }
-
-    #[test]
-    fn a_motor_names_its_drivers_modules_and_firmware_plainly() {
-        let with = |body: &str| DeviceConfig::parse(&format!("[device]\ncodename = \"x\"\n[haptics]\n{body}\n"));
-        let strength = "strength = { lightest = 0.25, strongest = 1.0 }";
-        assert!(with(&format!("modules = [\"cs40l26-core\", \"cs40l26-i2c\"]\n{strength}")).is_ok());
-        assert!(with(&format!("firmware = [{{ name = \"cs40l26.wmfw\", path = \"/odm/firmware/o8/cs40l26.wmfw\" }}]\n{strength}")).is_ok());
-        assert!(with(&format!("firmware = [{{ name = \"cs40l26.wmfw\", partition = \"odm\", path = \"firmware/o8/cs40l26.wmfw\" }}]\n{strength}")).is_ok());
-        for bad in ["\"cs40l26-core.ko\"", "\"/lib/modules/x\"", "\"\""] {
-            assert!(with(&format!("modules = [{bad}]\n{strength}")).is_err(), "module {bad} is refused");
-        }
-        for bad in ["\"/cs40l26.wmfw\"", "\"../x.wmfw\"", "\"\""] {
-            let body = format!("firmware = [{{ name = {bad}, path = \"/x\" }}]\n{strength}");
-            assert!(with(&body).is_err(), "firmware name {bad} is refused");
-        }
-        let bad = format!("firmware = [{{ name = \"a.wmfw\", partition = \"by-name/odm\", path = \"a\" }}]\n{strength}");
-        assert!(with(&bad).is_err(), "a partition named by a path is refused");
     }
 
     #[test]
@@ -873,93 +684,35 @@ mod tests {
     }
 
     #[test]
-    fn parses_haotian() {
-        let cfg = DeviceConfig::parse(include_str!("../../../devices/haotian.toml")).unwrap();
-        assert_eq!(cfg.device.codename, "haotian");
-        assert_eq!(cfg.device.model, "Xiaomi 15 Pro");
-        assert!(cfg.device.ab);
+    fn parses_nezha() {
+        let cfg = DeviceConfig::parse(include_str!("../../../devices/nezha.toml")).unwrap();
+        assert_eq!(cfg.device.codename, "nezha");
         assert_eq!(cfg.device.os_version_prop, "ro.mi.os.version.incremental");
-        let soc = cfg.device.soc.expect("haotian names its SoC");
-        assert_eq!(soc.en, "Snapdragon® 8 Elite Mobile Platform");
-        assert_eq!((cfg.display.width, cfg.display.height, cfg.display.density), (1440, 3200, 600));
-        assert_eq!(cfg.display.diagonal, Some(6.73));
-        assert_eq!(cfg.display.corner_radius, 140);
-        // The touchscreen, and the two drivers the secure element's HAL needs
-        // before it can see the eSE at all.
-        assert_eq!(cfg.modules.load, ["synaptics_tcm2", "stm_st54se_gpio", "stm_nfc_i2c"]);
+        let soc = cfg.device.soc.expect("nezha names its SoC");
+        assert_eq!(soc.hans, "第五代骁龙®8至尊版移动平台");
+        assert_eq!(soc.en, "Snapdragon® 8 Elite Gen 5 Mobile Platform");
+        assert_eq!(cfg.display.width, 1200);
+        assert_eq!(cfg.display.diagonal, Some(6.9));
+        assert_eq!(cfg.modules.load, ["synaptics_tcm2"]);
         assert_eq!(
             cfg.touch.writes,
             [Write { path: "/sys/class/touch/touch_dev/enable_touch_raw".into(), value: "0".into() }],
             "its controller reports positions itself"
         );
-        assert!(cfg.touch.double_tap, "two taps light its dark panel, as the phone's own system's do");
         assert_eq!(cfg.firmware, Some(FirmwarePartition { partition: "modem".into() }));
         assert_eq!(cfg.partitions.mounted, ["persist"], "the secure world keeps its own files there");
-        // The programs the credential chain runs, in the order they start:
-        // the TEE's listener, its mink daemon, the loader, then the key,
-        // credential and secure-element services, the OMAPI service the
-        // Thales weaver reaches its element through, and that weaver.
-        let paths: Vec<&str> = cfg.services.iter().map(|s| s.path.as_str()).collect();
-        assert_eq!(
-            paths,
-            [
-                "/vendor/bin/sh",
-                "/vendor/bin/qseecomd",
-                "/vendor/bin/ssgtzd",
-                "/vendor/bin/hlosminkdaemon",
-                "/vendor/bin/hw/android.hardware.security.keymint-service-qti",
-                "/vendor/bin/hw/android.hardware.gatekeeper-service-qti",
-                "/vendor/bin/hw/android.hardware.secure_element-service.qti",
-                "/system/bin/se_omapi",
-                "/odm/bin/hw/android.hardware.weaver-service.thales",
-                "/vendor/bin/hw/android.hardware.boot-service.qti",
-            ]
-        );
-        for s in &cfg.services {
-            assert_eq!(s.libraries[..2], ["/system/lib64", "/vendor/lib64"], "{} loads the recovery's own libraries first", s.path);
-            assert_eq!(s.ready_hardware_service, None, "{} is of the newer kind", s.path);
-        }
-        let [post_boot, listeners, mink, opener, keymint, gatekeeper, element, omapi, weaver, boot] = &cfg.services[..] else {
-            panic!("ten programs")
-        };
+        let [post_boot] = &cfg.services[..] else { panic!("one program: those that use the phone's keys are read from the phone's own partitions") };
+        assert_eq!(post_boot.path, "/vendor/bin/sh");
         assert!(post_boot.oneshot, "the system's own settings for after start are made once");
         assert_eq!(post_boot.args, ["/vendor/bin/init.kernel.post_boot.sh"]);
-        assert!(cfg.services[1..].iter().all(|s| !s.oneshot && s.args.is_empty()));
-        assert_eq!(listeners.ready_property.as_deref(), Some("vendor.sys.listeners.registered"));
-        // The mink daemon registers nothing: what it makes is the two sockets
-        // the trustlets wait on.
-        assert_eq!((mink.ready_property.as_ref(), mink.ready_service.as_ref()), (None, None));
-        assert_eq!(mink.sockets.iter().map(|s| s.name.as_str()).collect::<Vec<_>>(), ["ssgtzd", "ssgtzd_opener"]);
-        assert_eq!((opener.ready_property.as_ref(), opener.ready_service.as_ref()), (None, None));
-        assert_eq!(keymint.ready_service.as_deref(), Some("android.hardware.security.keymint.IKeyMintDevice/default"));
-        assert!(keymint.registers.contains(&"android.hardware.security.secureclock.ISecureClock/default".to_string()));
-        assert!(keymint.registers.contains(&"android.hardware.security.sharedsecret.ISharedSecret/default".to_string()));
-        assert_eq!(gatekeeper.ready_service.as_deref(), Some("android.hardware.gatekeeper.IGatekeeper/default"));
-        assert_eq!(gatekeeper.user.as_deref(), Some("root"), "the trustlet is unreachable as system");
-        assert_eq!(element.ready_service.as_deref(), Some("android.hardware.secure_element.ISecureElement/eSE1"));
-        assert_eq!(element.user.as_deref(), Some("root"), "it opens QSEECom, and asks the element over the ADSP");
-        assert_eq!(omapi.ready_service.as_deref(), Some("android.se.omapi.ISecureElementService/default"));
-        assert_eq!(weaver.ready_service.as_deref(), Some("android.hardware.weaver.IWeaver/default"));
-        assert_eq!(weaver.user.as_deref(), Some("vendor_thales_weaver"));
-        assert_eq!(boot.ready_service.as_deref(), Some("android.hardware.boot.IBootControl/default"));
-        // The CS40L26 says its frequency nowhere, so the click is made at the
-        // nominal one, from the calibration the motor was tested with.
-        let haptics = cfg.haptics.expect("haotian has a motor");
-        assert_eq!(
-            (haptics.click, haptics.resonance.as_deref()),
-            (None, Some("/sys/bus/i2c/devices/0-0043/input/input6/calibration/f0_stored"))
-        );
+        assert_eq!(post_boot.libraries, ["/system/lib64", "/vendor/lib64"], "it loads the recovery's own libraries first");
+        let haptics = cfg.haptics.expect("the 17 Ultra has a motor");
+        assert_eq!((haptics.click, haptics.resonance.as_str()), (None, "/sys/class/qcom-haptics/lra_frequency_hz"), "its click is made");
         assert_eq!(haptics.strength, Strength { lightest: 0.25, strongest: 0.75 }, "past three quarters the motor rattles");
-        assert_eq!(haptics.modules, ["cs40l26-core", "cs40l26-i2c"]);
         assert_eq!(cfg.backup.efs, ["modemst1", "modemst2", "fsg", "fsc", "persist"]);
-        assert!(cfg.backup.data_skipped.contains(&"vendor/mitee".to_string()));
+        assert!(cfg.backup.data_skipped.contains(&"vendor/goodix".to_string()));
         assert!(cfg.wipe.logs.contains(&"/data/vendor/bsplog".to_string()));
-        // The panel's own doze, and the two taps that light it.
-        assert_eq!((cfg.aod.as_ref().map(|a| a.enter_cmds.clone()), cfg.aod.as_ref().map(|a| a.leave_cmds.clone())), (Some(vec![44]), Some(vec![18])));
-        assert_eq!(cfg.wlan.as_ref().map(|w| w.interface.as_str()), Some("wlan0"));
     }
-
-
 
     #[test]
     fn a_program_runs_only_where_the_property_has_its_value() {
@@ -982,7 +735,6 @@ mod tests {
         assert!(DeviceConfig::parse(&format!("{base}ready_property = \"vendor.a\"\n")).is_err());
         assert!(DeviceConfig::parse(&format!("{base}ready_service = \"a.IA/default\"\n")).is_err());
         assert!(DeviceConfig::parse(&format!("{base}registers = [\"a.IB/default\"]\n")).is_err());
-        assert!(DeviceConfig::parse(&format!("{base}description = \"/vendor/etc/a.xml\"\n")).is_err());
         let kept = DeviceConfig::parse("[device]\ncodename = \"x\"\n[[service]]\npath = \"/vendor/bin/a\"\n").unwrap();
         assert!(!kept.services[0].oneshot && kept.services[0].args.is_empty(), "a program is kept running unless it says otherwise");
     }
@@ -1007,44 +759,48 @@ mod tests {
     }
 
     #[test]
-    fn haotians_programs_run_as_their_init_scripts_run_them() {
-        let cfg = DeviceConfig::parse(include_str!("../../../devices/haotian.toml")).unwrap();
-        for s in &cfg.services {
+    fn each_phones_programs_run_as_their_init_scripts_run_them() {
+        let nezha = DeviceConfig::parse(include_str!("../../../devices/nezha.toml")).unwrap();
+        let ishtar = DeviceConfig::parse(include_str!("../../../devices/ishtar.toml")).unwrap();
+        for s in nezha.services.iter().chain(&ishtar.services) {
             assert!(s.user.is_some(), "{} names the user its init script does", s.path);
         }
-        let find = |path: &str| cfg.services.iter().find(|s| s.path == path).cloned().expect("listed");
-        let element = find("/vendor/bin/hw/android.hardware.secure_element-service.qti");
-        assert_eq!(
-            (element.user.as_deref(), &element.groups[..]),
-            (Some("root"), &["root".to_string(), "nfc".to_string()][..]),
-            "it opens QSEECom, and asks the element for its vendor id over the ADSP"
-        );
-        let weaver = find("/odm/bin/hw/android.hardware.weaver-service.thales");
-        assert_eq!(
-            (weaver.user.as_deref(), &weaver.groups[..]),
-            (
-                Some("vendor_thales_weaver"),
-                &["vendor_thales_weaver".to_string(), "system".to_string(), "drmrpc".to_string()][..]
-            )
-        );
-        let listeners = find("/vendor/bin/qseecomd");
-        assert_eq!((listeners.user.as_deref(), &listeners.groups[..]), (Some("root"), &["root".to_string(), "drmrpc".to_string()][..]));
-        let opener = find("/vendor/bin/hlosminkdaemon");
-        assert_eq!(opener.capabilities, ["WAKE_ALARM", "BLOCK_SUSPEND"]);
-        // The mink daemon keeps falling asleep off the CPU without these, and
-        // a trustlet waiting on it then waits for good.
-        let mink = find("/vendor/bin/ssgtzd");
-        assert_eq!(mink.capabilities, ["WAKE_ALARM", "BLOCK_SUSPEND"]);
-        assert_eq!(mink.user.as_deref(), Some("system"));
+        let find = |cfg: &DeviceConfig, path: &str| cfg.services.iter().find(|s| s.path == path).cloned().expect("listed");
+        let post_boot = find(&nezha, "/vendor/bin/sh");
+        assert_eq!((post_boot.user.as_deref(), &post_boot.groups[..]), (Some("root"), &["root", "system", "wakelock", "graphics"].map(str::to_string)[..]));
+        let touch = find(&ishtar, "/odm/bin/touch_report");
+        assert_eq!((touch.user.as_deref(), &touch.capabilities[..]), (Some("system"), &["SYS_NICE".to_string()][..]));
     }
 
     #[test]
-    fn the_phone_names_the_stock_build_its_recovery_is_made_on() {
-        let text = include_str!("../../../devices/haotian.toml");
-        let version = "OS4.0.0.19.XOBCNXM";
-        let stock = DeviceConfig::parse(text).unwrap().stock.expect("a stock build to build on");
-        assert_eq!(stock.version, version);
-        assert!(stock.package.ends_with(".zip") && stock.package.contains(&format!("/{version}/")), "{}", stock.package);
+    fn each_phone_names_the_stock_build_its_recovery_is_made_on() {
+        for (text, version) in [
+            (include_str!("../../../devices/nezha.toml"), "OS4.0.4.0.XPACNXM"),
+            (include_str!("../../../devices/ishtar.toml"), "OS3.0.308.0.WMACNXM"),
+            (include_str!("../../../devices/pudding.toml"), "OS4.0.4.0.XPCCNXM"),
+            (include_str!("../../../devices/pandora.toml"), "OS4.0.4.0.XBLCNXM"),
+            (include_str!("../../../devices/popsicle.toml"), "OS4.0.4.0.XPBCNXM"),
+            (include_str!("../../../devices/myron.toml"), "OS4.0.4.0.XPMCNXM"),
+            (include_str!("../../../devices/songyuan.toml"), "OS4.0.4.0.XGNCNXM"),
+            (include_str!("../../../devices/athens.toml"), "OS4.0.4.0.XPICNXM"),
+            (include_str!("../../../devices/fuxi.toml"), "OS3.0.309.0.WMCCNXM"),
+            (include_str!("../../../devices/nuwa.toml"), "OS3.0.312.0.WMBCNXM"),
+            (include_str!("../../../devices/houji.toml"), "OS3.0.307.0.WNCCNXM"),
+            (include_str!("../../../devices/shennong.toml"), "OS3.0.309.0.WNBCNXM"),
+            (include_str!("../../../devices/aurora.toml"), "OS3.0.308.0.WNACNXM"),
+            (include_str!("../../../devices/dada.toml"), "OS3.0.307.0.WOCCNXM"),
+            (include_str!("../../../devices/haotian.toml"), "OS3.0.309.0.WOBCNXM"),
+            (include_str!("../../../devices/xuanyuan.toml"), "OS3.0.314.0.WOACNXM"),
+            (include_str!("../../../devices/byron.toml"), "OS3.0.310.0.WAFCNXM"),
+            (include_str!("../../../devices/zorn.toml"), "OS3.0.309.0.WOKCNXM"),
+            (include_str!("../../../devices/miro.toml"), "OS3.0.305.0.WOMCNXM"),
+            (include_str!("../../../devices/annibale.toml"), "OS3.0.307.0.WPKCNXM"),
+            (include_str!("../../../devices/warsaw.toml"), "OS3.0.309.0.WHPCNXM"),
+        ] {
+            let stock = DeviceConfig::parse(text).unwrap().stock.expect("a stock build to build on");
+            assert_eq!(stock.version, version);
+            assert!(stock.package.ends_with(".zip") && stock.package.contains(&format!("/{version}/")), "{}", stock.package);
+        }
     }
 
     #[test]
@@ -1077,60 +833,34 @@ mod tests {
         assert!(with("").is_err());
         assert!(DeviceConfig::parse("[device]\ncodename = \"x\"\n").unwrap().partitions.mounted.is_empty(), "a phone may need none");
     }
+
     #[test]
-    fn parses_haotians_touch_layer() {
-        let cfg = DeviceConfig::parse(include_str!("../../../devices/haotian.toml")).unwrap();
-        assert_eq!(cfg.device.codename, "haotian");
-        assert_eq!((cfg.display.width, cfg.display.height, cfg.display.density), (1440, 3200, 600));
-        assert_eq!(cfg.modules.load, ["synaptics_tcm2", "stm_st54se_gpio", "stm_nfc_i2c"]);
-        // The node the phone's own init opens to every program, which a
-        // recovery leaves the owner's alone: the touch layer writes through
-        // it, so it is handed back to root with a mode every account may use.
+    fn parses_ishtar() {
+        let cfg = DeviceConfig::parse(include_str!("../../../devices/ishtar.toml")).unwrap();
+        assert_eq!(cfg.device.codename, "ishtar");
+        assert_eq!((cfg.display.width, cfg.display.height, cfg.display.density), (1440, 3200, 560));
+        assert_eq!(cfg.modules.load, ["fts_touch_spi"]);
+        assert!(cfg.touch.writes.is_empty(), "its own touch processing runs");
         let [touch_owners] = &cfg.owners[..] else { panic!("one run of the touch layer's files") };
-        assert_eq!((touch_owners.user.as_str(), touch_owners.group.as_str(), touch_owners.mode), ("root", "root", 0o666));
+        assert_eq!((touch_owners.user.as_str(), touch_owners.group.as_str(), touch_owners.mode), ("system", "system", 0o664));
         assert!(
             touch_owners.paths.iter().any(|p| p == "/dev/xiaomi-touch"),
-            "the touch layer's node, which the panel reports positions through"
+            "the touch processing, run as system, opens the touch layer's node"
         );
-        assert_eq!(cfg.firmware, Some(FirmwarePartition { partition: "modem".into() }), "the modem partition holds the firmware");
-        // The programs the recovery starts, in the order it starts them: the
-        // phone's own settings made once, then the TEE's listener, its mink
-        // daemon, the loader, the key and credential services, the secure
-        // element, the OMAPI service the Thales weaver reaches it through,
-        // that weaver itself, and the boot control.
+        assert!(cfg.firmware.is_none(), "its recovery mounts the modem partition itself");
         let paths: Vec<&str> = cfg.services.iter().map(|s| s.path.as_str()).collect();
-        assert_eq!(
-            paths,
-            [
-                "/vendor/bin/sh",
-                "/vendor/bin/qseecomd",
-                "/vendor/bin/ssgtzd",
-                "/vendor/bin/hlosminkdaemon",
-                "/vendor/bin/hw/android.hardware.security.keymint-service-qti",
-                "/vendor/bin/hw/android.hardware.gatekeeper-service-qti",
-                "/vendor/bin/hw/android.hardware.secure_element-service.qti",
-                "/system/bin/se_omapi",
-                "/odm/bin/hw/android.hardware.weaver-service.thales",
-                "/vendor/bin/hw/android.hardware.boot-service.qti",
-            ]
-        );
-        assert!(cfg.services[0].oneshot, "the settings for after start are made once");
-        assert_eq!(cfg.services[2].ready_property, None, "the mink daemon is ready when its sockets are, and registers nothing");
-        assert_eq!(
-            cfg.services[4].ready_service.as_deref(),
-            Some("android.hardware.security.keymint.IKeyMintDevice/default")
-        );
-        assert_eq!(cfg.services[6].ready_service.as_deref(), Some("android.hardware.secure_element.ISecureElement/eSE1"));
-        assert_eq!(cfg.services[7].ready_service.as_deref(), Some("android.se.omapi.ISecureElementService/default"));
-        assert_eq!(cfg.services[9].ready_service.as_deref(), Some("android.hardware.boot.IBootControl/default"));
-        assert!(cfg.services.iter().all(|s| s.ready_hardware_service.is_none()), "every one of them is of the newer kind");
+        assert_eq!(paths, ["/odm/bin/touch_report", "/odm/bin/touchsensor"], "the touch processing: the programs that use the phone's keys are read from the phone's own partitions");
+        assert_eq!(cfg.services[1].libraries, ["/odm/lib64", "/system/lib64"]);
+        for s in &cfg.services {
+            assert_eq!((s.ready_property.as_ref(), s.ready_service.as_ref(), s.ready_hardware_service.as_ref()), (None, None, None), "the touch programs are ready as soon as they run");
+        }
         assert_eq!(cfg.backup.efs, ["modemst1", "modemst2", "fsg", "fsc", "persist"]);
         assert!(cfg.backup.data_skipped.contains(&"vendor/tzstorage".to_string()));
     }
 
     #[test]
     fn the_phone_is_read_from_a_configuration_this_build_cannot_read_whole() {
-        assert_eq!(codename(include_str!("../../../devices/haotian.toml")).unwrap(), "haotian");
+        assert_eq!(codename(include_str!("../../../devices/ishtar.toml")).unwrap(), "ishtar");
         let later = "[device]\ncodename = \"x\"\nab = \"no longer a switch\"\n[display]\nwidth = \"wide\"\n[aurora]\nnew = 1\n";
         assert!(DeviceConfig::parse(later).is_err());
         assert_eq!(codename(later).unwrap(), "x");
@@ -1148,7 +878,7 @@ mod tests {
 
     #[test]
     fn the_phones_own_logs_are_folders_inside_the_data_partition() {
-        let cfg = DeviceConfig::parse(include_str!("../../../devices/haotian.toml")).unwrap();
+        let cfg = DeviceConfig::parse(include_str!("../../../devices/ishtar.toml")).unwrap();
         assert!(cfg.wipe.logs.contains(&"/data/vendor/diag".to_string()));
         assert!(DeviceConfig::parse("[device]\ncodename = \"x\"\n").unwrap().wipe.logs.is_empty(), "a phone may have none");
         for bad in ["/data", "/data/", "/metadata/logs", "data/log", "/data/../system"] {
@@ -1158,25 +888,32 @@ mod tests {
     }
 
     #[test]
-    fn haotian_brings_its_wlan_up_from_its_own_partitions() {
-        let cfg = DeviceConfig::parse(include_str!("../../../devices/haotian.toml")).unwrap();
-        assert!(cfg.modules.sources.iter().any(|s| s == "system_dlkm"), "the kernel's own modules are a source");
-        let wlan = cfg.wlan.expect("haotian's WLAN is described");
-        assert_eq!(wlan.modules, ["rfkill", "qca_cld3_peach_v2"]);
-        assert_eq!(
-            wlan.writes,
-            [Write { path: "/sys/bus/platform/devices/b0000000.qcom,cnss-peach/fs_ready".into(), value: "1".into() }]
-        );
-        assert_eq!(wlan.firmware[0].path, "/vendor/etc/wifi/peach/WCNSS_qcom_cfg.ini");
+    fn ishtar_brings_its_wlan_up_from_its_own_partitions() {
+        let cfg = DeviceConfig::parse(include_str!("../../../devices/ishtar.toml")).unwrap();
+        let wlan = cfg.wlan.expect("the 13 Ultra's WLAN is described");
+        assert_eq!(wlan.modules, ["qca_cld3_kiwi_v2"]);
+        assert_eq!(wlan.writes, [Write { path: "/sys/kernel/cnss/fs_ready".into(), value: "1".into() }]);
+        assert_eq!(wlan.firmware[0].partition, None);
         assert_eq!(wlan.firmware[1].partition.as_deref(), Some("persist"));
-        assert_eq!(wlan.firmware[1].path, "wlan/wlan_mac.bin");
-        assert_eq!(wlan.libraries, ["/system/lib64", "/vendor/lib64"], "the recovery's own libraries come first");
+        assert_eq!(wlan.firmware[1].path, "kiwi_v2/wlan_mac.bin");
         assert_eq!(wlan.interface, "wlan0");
         assert_eq!(wlan.service, "android.hardware.wifi.supplicant.ISupplicant/default");
         assert_eq!(wlan.probe, "http://connect.rom.miui.com/generate_204");
         assert_eq!(cfg.update.expect("its update server is known").server, "https://update.miui.com/updates/miotaV3.php");
     }
 
+    #[test]
+    fn nezha_brings_its_wlan_up_from_its_own_partitions() {
+        let cfg = DeviceConfig::parse(include_str!("../../../devices/nezha.toml")).unwrap();
+        assert!(cfg.modules.sources.iter().any(|s| s == "system_dlkm"), "the kernel's own modules are a source");
+        let wlan = cfg.wlan.expect("the 17 Ultra's WLAN is described");
+        assert_eq!(wlan.modules, ["rfkill", "qca_cld3_peach_v2"]);
+        assert_eq!(wlan.writes, [Write { path: "/sys/kernel/cnss/fs_ready".into(), value: "1".into() }]);
+        assert!(wlan.firmware.is_empty(), "the vendor's own links reach its settings and persist's MAC address");
+        assert_eq!(wlan.libraries, ["/system/lib64", "/vendor/lib64"], "the recovery's own libraries come first");
+        assert_eq!(wlan.probe, "http://connect.rom.miui.com/generate_204", "as the stock system asks it");
+        assert_eq!(cfg.update.expect("its update server is known").server, "https://update.miui.com/updates/miotaV3.php");
+    }
 
     #[test]
     fn a_wlan_is_probed_over_plain_http() {
@@ -1201,48 +938,14 @@ mod tests {
 
     #[test]
     fn services_use_the_partitions_they_run_from() {
-        let cfg = DeviceConfig::parse(include_str!("../../../devices/haotian.toml")).unwrap();
-        let find = |path: &str| cfg.services.iter().find(|s| s.path == path).cloned().expect("listed");
-        // The weaver runs out of the odm partition and its libraries come from
-        // there too; the TEE's listener is the vendor partition's.
-        let weaver = find("/odm/bin/hw/android.hardware.weaver-service.thales");
-        assert!(weaver.uses(Path::new("/odm")));
-        assert!(!weaver.uses(Path::new("/odm_dlkm")), "a longer name is another partition");
-        assert!(weaver.uses(Path::new("/vendor/lib64")), "its libraries are there as well");
-        let listeners = find("/vendor/bin/qseecomd");
-        assert!(listeners.uses(Path::new("/vendor")));
-        // The OMAPI service is the recovery's own, in the ramdisk.
-        let omapi = find("/system/bin/se_omapi");
-        assert!(!omapi.uses(Path::new("/mnt/system")), "its /system/lib64 is the recovery's own");
-    }
-
-    #[test]
-    fn a_doze_names_its_command_sets_both_ways() {
-        let cfg = DeviceConfig::parse(include_str!("../../../devices/haotian.toml")).unwrap();
-        let aod = cfg.aod.expect("haotian dozes with the panel's own command sets");
-        assert_eq!((aod.enter_cmds, aod.leave_cmds), (vec![44], vec![18]), "the high-brightness doze in, the way out");
-        assert_eq!(aod.enter.len(), 1, "the driver's doze brightness is set before the panel dozes");
-        assert_eq!((aod.enter[0].id, aod.enter[0].value.as_str()), (3, "1"));
-        assert_eq!(aod.node, "/proc/mi_display/tx_cmd_set_prim");
-        let base = "[device]\ncodename = \"x\"\n";
-        assert!(DeviceConfig::parse(base).unwrap().aod.is_none(), "a phone that names none blanks the ordinary way");
-        assert!(DeviceConfig::parse(&format!("{base}\n[aod]\nenter_cmds = [45]\n")).is_err(), "no way back out");
-        assert!(DeviceConfig::parse(&format!("{base}\n[aod]\nleave_cmds = [18]\n")).is_err(), "no way in");
-        let relative = format!("{base}\n[aod]\nnode = \"proc/x\"\nenter_cmds = [45]\nleave_cmds = [18]\n");
-        assert!(DeviceConfig::parse(&relative).is_err());
-    }
-
-    /// haotian's panel lights on two taps, as the phone's own system's does;
-    /// no other phone is given that, since a phone whose controller stops
-    /// reporting fingers with its panel off has nothing for it to work with.
-    #[test]
-    fn the_phone_whose_panel_lights_on_two_taps_names_it() {
-        let cfg = DeviceConfig::parse(include_str!("../../../devices/haotian.toml")).unwrap();
-        assert!(cfg.touch.double_tap, "two taps on its dark panel light it");
-        // A phone that names nothing lights only by its power key.
-        let none = "[device]\ncodename = \"x\"\n";
-        assert!(!DeviceConfig::parse(none).unwrap().touch.double_tap);
-        let set = format!("{none}\n[touch.double_tap]\n");
-        assert!(DeviceConfig::parse(&set).is_err(), "the flag is a word of [touch], not a table of its own");
+        let cfg = DeviceConfig::parse(include_str!("../../../devices/ishtar.toml")).unwrap();
+        let [report, sensor] = &cfg.services[..] else { panic!("ishtar keeps its two touch programs running") };
+        assert!(report.uses(Path::new("/odm")));
+        assert!(sensor.uses(Path::new("/odm")));
+        assert!(!report.uses(Path::new("/odm_dlkm")), "a longer name is another partition");
+        assert!(!sensor.uses(Path::new("/mnt/system")), "its /system/lib64 is the recovery's own");
+        assert!(!report.uses(Path::new("/vendor")));
+        let nezha = DeviceConfig::parse(include_str!("../../../devices/nezha.toml")).unwrap();
+        assert!(nezha.services[0].uses(Path::new("/vendor")), "its shell and its libraries are the vendor partition's");
     }
 }
