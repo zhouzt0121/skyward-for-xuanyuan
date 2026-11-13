@@ -166,3 +166,5 @@ jobs:
             gh release create "$GITHUB_REF_NAME" "out/$name.img" out/SHA256SUMS \
               --title "$title" --generate-notes
           fi
+
+# CI re-run: build the reset commits on xuanyuan-0.3.
