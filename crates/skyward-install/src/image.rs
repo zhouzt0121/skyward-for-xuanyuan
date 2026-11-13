@@ -178,7 +178,7 @@ fn sparse_header<R: Read + Seek>(file: &mut R) -> Result<SparseHeader> {
     ensure!(le16(&h, 4) == 1, "sparse image of major version {}", le16(&h, 4));
     let header = SparseHeader { file_hdr: le16(&h, 8), chunk_hdr: le16(&h, 10), block: le32(&h, 12), blocks: le32(&h, 16), chunks: le32(&h, 20) };
     ensure!(header.file_hdr >= 28 && header.chunk_hdr >= 12, "a sparse header too short");
-    ensure!(header.block > 0 && header.block % 4 == 0, "a sparse block size of {}", header.block);
+    ensure!(header.block > 0 && header.block.is_multiple_of(4), "a sparse block size of {}", header.block);
     Ok(header)
 }
 
@@ -188,7 +188,6 @@ struct SparseChunk {
     kind: u16,
     out: u64,
     data_at: u64,
-    data_len: u64,
 }
 
 fn sparse_chunks<R: Read + Seek>(file: &mut R, h: &SparseHeader) -> Result<Vec<SparseChunk>> {
@@ -213,7 +212,7 @@ fn sparse_chunks<R: Read + Seek>(file: &mut R, h: &SparseHeader) -> Result<Vec<S
         if kind != CHUNK_CRC32 {
             blocks += size;
         }
-        chunks.push(SparseChunk { kind, out: if kind == CHUNK_CRC32 { 0 } else { out }, data_at: at + u64::from(h.chunk_hdr), data_len });
+        chunks.push(SparseChunk { kind, out: if kind == CHUNK_CRC32 { 0 } else { out }, data_at: at + u64::from(h.chunk_hdr) });
         at += total;
     }
     ensure!(blocks == u64::from(h.blocks), "sparse chunks cover {blocks} blocks of {}", h.blocks);
