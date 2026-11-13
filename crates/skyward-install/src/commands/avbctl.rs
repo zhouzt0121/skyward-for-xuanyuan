@@ -287,7 +287,7 @@ pub fn disable_slot(slot: skyward_vab::Slot) -> io::Result<Option<PathBuf>> {
 /// What an install turns off: both checks, verification and dm-verity,
 /// in the top-level vbmeta of the slot it leaves the phone starting from,
 /// as upstream Skyward 0.3.0 does.
-const AFTER_INSTALL: u32 = (1 << 0) | (1 << 1);
+const AFTER_INSTALL: u32 = 1 << 0;
 
 /// Where a vbmeta image is kept before it is changed, so that a phone that
 /// will not boot afterwards can be put back. `/tmp` is memory in a recovery,
