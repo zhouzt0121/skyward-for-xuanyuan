@@ -7,6 +7,7 @@ use std::io::{Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
 
 mod avb;
+mod described;
 
 use skyward_bootimg::{BootImage, Ramdisk};
 
@@ -19,9 +20,6 @@ struct Cli {
 }
 
 #[derive(Subcommand)]
-// The commands carry the paths and lists they were given; the largest is a
-// few hundred bytes, which is the one copy clap parses into either way.
-#[allow(clippy::large_enum_variant)]
 enum Cmd {
     /// Print an image's header and the files in its ramdisk.
     List { image: PathBuf },
@@ -58,11 +56,6 @@ enum Cmd {
         /// statically.
         #[arg(long)]
         system_init: PathBuf,
-        /// The first program of an init_boot ramdisk made permissive,
-        /// skyward-permissive-init built for the device and linked
-        /// statically.
-        #[arg(long)]
-        permissive_init: PathBuf,
         /// The device configuration, devices/<codename>.toml.
         #[arg(long)]
         config: PathBuf,
@@ -75,29 +68,6 @@ enum Cmd {
         /// The monospaced typeface's licence, which goes with it.
         #[arg(long)]
         mono_license: PathBuf,
-        /// A firmware file to put where the kernel's own loader finds it
-        /// before its first driver probe: name=local-file. The loader reads
-        /// /lib/firmware before it asks anyone else, and the motor's driver
-        /// probes in early-init, before a recovery starts, so that is where
-        /// the file has to be.
-        #[arg(long = "firmware")]
-        firmware: Vec<String>,
-        /// A module to put in the recovery's module directory, as
-        /// name.ko=local-file. It must match the recovery kernel, not merely
-        /// the installed system's vendor_dlkm.
-        #[arg(long = "module")]
-        modules: Vec<String>,
-        /// A folder holding se_omapi as system/bin/se_omapi and its service
-        /// description as se_omapi.xml.
-        ///
-        /// A phone whose weaver HAL reaches the secure element through
-        /// Android's own OMAPI service gets nothing back from it in a
-        /// recovery, which runs no such service: every call to the weaver
-        /// then fails, and a user's secret behind a weaver slot cannot be
-        /// read. se_omapi is that service on its own; this puts it in the
-        /// ramdisk, for the configuration to start.
-        #[arg(long)]
-        omapi: Option<PathBuf>,
         #[arg(long)]
         out: PathBuf,
     },
@@ -114,12 +84,26 @@ enum Cmd {
         /// Where to write the stock recovery image.
         #[arg(long)]
         out: Option<PathBuf>,
-        /// Another partition to take from the same package, such as odm.
-        /// It is written beside --out, named <partition>.img.
-        #[arg(long, requires = "out")]
-        partition: Option<String>,
     },
-
+    /// Take what a device's own partitions say of the programs they carry
+    /// out of its stock build's full update package on its server: the
+    /// init scripts, the service descriptions, the accounts and the build
+    /// properties of each partition that carries such programs, written
+    /// under `out` as the partition and then the path in it. Only the
+    /// parts of the package that hold these files are downloaded, each
+    /// checked against the package's own sum of it.
+    Described {
+        /// The device configuration, devices/<codename>.toml.
+        #[arg(long)]
+        config: PathBuf,
+        /// A partition to take them out of; vendor, odm and system_ext
+        /// when none is named.
+        #[arg(long = "partition")]
+        partitions: Vec<String>,
+        /// The folder to write the files under, which is not there yet.
+        #[arg(long)]
+        out: PathBuf,
+    },
 }
 
 fn main() -> Result<()> {
@@ -141,7 +125,7 @@ fn main() -> Result<()> {
             img.kernel = BootImage::read(&kernel)?.kernel;
             write(&out, &img, &img.to_bytes()?)
         }
-        Cmd::Recovery { stock, binary, system_init, permissive_init, config, font, mono, mono_license, firmware, modules, omapi, out } => {
+        Cmd::Recovery { stock, binary, system_init, config, font, mono, mono_license, out } => {
             let size = partition_size(&stock)?;
             let mut img = BootImage::read(&stock)?;
             let mut rd = Ramdisk::decode(&img.ramdisk)?;
@@ -160,36 +144,17 @@ fn main() -> Result<()> {
             for command in paths::COMMANDS {
                 rd.link(command, recovery)?;
             }
-            // The second system's first program: it runs before any library
-            // is there to load, so it is given a place of its own.
-            put(&mut rd, paths::SYSTEM_INIT, 0o755, read(&system_init)?)?;
-            put(&mut rd, paths::PERMISSIVE_INIT, 0o755, read(&permissive_init)?)?;
-            put(&mut rd, paths::CONFIG, 0o644, read(&config)?)?;
-            put(&mut rd, paths::FONT, 0o644, read(&font)?)?;
-            put(&mut rd, paths::MONO, 0o644, read(&mono)?)?;
-            put(&mut rd, paths::MONO_LICENSE, 0o644, read(&mono_license)?)?;
-            for file in firmware {
-                let (name, from) = file.split_once('=').with_context(|| "--firmware takes name=local-file")?;
-                ensure!(!name.is_empty() && !name.starts_with('/') && !name.contains(".."), "{name} is not a firmware name");
-                put(&mut rd, &format!("lib/firmware/{name}"), 0o644, read(&PathBuf::from(from))?)?;
-            }
-            for file in modules {
-                let (name, from) = file.split_once('=').with_context(|| "--module takes name.ko=local-file")?;
-                ensure!(name.ends_with(".ko") && !name.contains('/') && !name.contains(".."), "{name} is not a module name");
-                put(&mut rd, &format!("lib/modules/{name}"), 0o644, read(&PathBuf::from(from))?)?;
-            }
+            rd.add(paths::SYSTEM_INIT, 0o755, read(&system_init)?)?;
+            rd.add(paths::CONFIG, 0o644, read(&config)?)?;
+            rd.add(paths::FONT, 0o644, read(&font)?)?;
+            rd.add(paths::MONO, 0o644, read(&mono)?)?;
+            rd.add(paths::MONO_LICENSE, 0o644, read(&mono_license)?)?;
             // A stock ramdisk may run logd without any scheduling profiles,
             // and logd stops as soon as it cannot find the one it asks for.
             if rd.find(paths::TASK_PROFILES).is_none() {
                 rd.add(paths::TASK_PROFILES, 0o644, TASK_PROFILES.to_vec())?;
             }
-            put(&mut rd, paths::MTP_RC, 0o644, MTP_RC.to_vec())?;
-            // The OMAPI service the weaver reaches a secure element through,
-            // and the description the service directory wants of it. The
-            // recovery starts it with the phone's other services.
-            if let Some(stage) = &omapi {
-                install_omapi(&mut rd, stage, &read)?;
-            }
+            rd.add(paths::MTP_RC, 0o644, MTP_RC.to_vec())?;
             // On an unlocked device adbd keeps root when ro.secure is 0 and
             // lets any computer in without authorization when ro.adb.secure is
             // 0; init lets a later line of a property file override an earlier
@@ -205,26 +170,20 @@ fn main() -> Result<()> {
             rd.replace(paths::PROP_DEFAULT, props)?;
             img.ramdisk = rd.encode()?;
             let bytes = img.to_bytes()?;
-            // The bootloader gives the secure world the version and patch
-            // level the stock footer names; the system's keys were made
-            // under those, so the recovery's footer names the same.
-            let stock_props = avb::properties(&std::fs::read(&stock).with_context(|| format!("read {}", stock.display()))?);
-            for (key, value, _) in &stock_props {
-                println!("{key}={value}");
-            }
-            if !stock_props.iter().any(|(key, _, _)| key.ends_with(".security_patch")) {
-                eprintln!("warning: {} names no security patch in its footer; the data partition may not open", stock.display());
-            }
-            let props: Vec<u8> = stock_props.into_iter().flat_map(|(_, _, d)| d).collect();
-            write(&out, &img, &avb::footed(&bytes, "recovery", size, &Sha256::digest(&bytes), &props)?)
+            write(&out, &img, &avb::footed(&bytes, "recovery", size, &Sha256::digest(&bytes))?)
         }
-        Cmd::Stock { config, out, partition } => {
+        Cmd::Stock { config, out } => {
             let stock = skyward_config::DeviceConfig::load(&config)?.stock.with_context(|| format!("{} names no stock build", config.display()))?;
             println!("version={}\npackage={}\nrecovery={}", stock.version, stock.package, stock.recovery);
-            match (out, partition) {
-                (Some(out), partition) => take_stock_recovery(&stock, &out, partition.as_deref()),
-                (None, _) => Ok(()),
+            match out {
+                Some(out) => take_stock_recovery(&stock, &out),
+                None => Ok(()),
             }
+        }
+        Cmd::Described { config, partitions, out } => {
+            let stock = skyward_config::DeviceConfig::load(&config)?.stock.with_context(|| format!("{} names no stock build", config.display()))?;
+            let partitions = if partitions.is_empty() { skyward_programs::phone::PARTITIONS.map(str::to_string).to_vec() } else { partitions };
+            described::take(&stock.package, &partitions, &out)
         }
     }
 }
@@ -232,33 +191,16 @@ fn main() -> Result<()> {
 /// The partition a recovery is made on, as a full update package names it.
 const RECOVERY: &str = "recovery";
 
-/// Refuse a name that is not a partition of its own.
-///
-/// The name becomes a path beside `--out`, so nothing in it may lead
-/// anywhere else, and the recovery partition is taken out already: asking for
-/// it twice would write it over itself.
-fn separate_partition(name: &str) -> Result<()> {
-    ensure!(
-        !name.is_empty() && name.bytes().all(|c| c.is_ascii_alphanumeric() || c == b'_' || c == b'-') && name != RECOVERY,
-        "{name} is not a separate partition name: give one such as odm, which is written beside --out"
-    );
-    Ok(())
-}
-
 /// Take the recovery partition out of the stock build's full update package
 /// on its server, reading only what that partition takes of it, and write it
 /// to `out` once its SHA-256 is the one the configuration names.
-fn take_stock_recovery(stock: &skyward_config::Stock, out: &Path, other: Option<&str>) -> Result<()> {
-    if let Some(name) = other {
-        separate_partition(name)?;
-    }
+fn take_stock_recovery(stock: &skyward_config::Stock, out: &Path) -> Result<()> {
     let parent = out.parent().filter(|p| !p.as_os_str().is_empty()).unwrap_or(Path::new("."));
     std::fs::create_dir_all(parent).with_context(|| format!("make {}", parent.display()))?;
     // Taken out beside where it goes, so it is moved there whole.
     let work = tempfile::Builder::new().prefix(".stock").tempdir_in(parent).with_context(|| format!("make a folder in {}", parent.display()))?;
     let payload = unpayload::Payload::open_url(&stock.package).with_context(|| format!("open {}", stock.package))?;
-    let partitions = std::iter::once(RECOVERY.into()).chain(other.map(str::to_owned)).collect();
-    let options = unpayload::ExtractOptions { output_dir: work.path().to_path_buf(), partitions, ..Default::default() };
+    let options = unpayload::ExtractOptions { output_dir: work.path().to_path_buf(), partitions: vec![RECOVERY.into()], ..Default::default() };
     let report = |event: unpayload::Event<'_>| match event {
         unpayload::Event::Started { partitions } => {
             for (name, bytes) in partitions {
@@ -273,12 +215,6 @@ fn take_stock_recovery(stock: &skyward_config::Stock, out: &Path, other: Option<
     let sum: String = image.sha256.as_deref().context("the package's own sum of the image was not checked")?.iter().map(|b| format!("{b:02x}")).collect();
     ensure!(sum == stock.recovery, "the {RECOVERY} partition in {} has the SHA-256 {sum}, where the configuration names {}", stock.package, stock.recovery);
     std::fs::rename(&image.path, out).with_context(|| format!("move {} to {}", image.path.display(), out.display()))?;
-    if let Some(partition) = other {
-        let extra = taken.iter().find(|i| i.partition == partition).with_context(|| format!("{} holds no {partition} partition", stock.package))?;
-        let target = out.parent().unwrap_or(Path::new(".")).join(format!("{partition}.img"));
-        std::fs::rename(&extra.path, &target).with_context(|| format!("move {} to {}", extra.path.display(), target.display()))?;
-        println!("wrote {} ({} bytes)", target.display(), extra.size);
-    }
     println!("wrote {} ({} bytes), its SHA-256 the one the configuration names", out.display(), image.size);
     Ok(())
 }
@@ -319,55 +255,6 @@ const TASK_PROFILES: &[u8] = include_bytes!("task_profiles.json");
 /// stock recovery does not offer.
 const MTP_RC: &[u8] = include_bytes!("mtp.rc");
 
-/// The OMAPI service a weaver reaches a secure element through, and the
-/// description that lets it register.
-///
-/// The service registers `android.se.omapi.ISecureElementService/default`,
-/// which is the name the Thales weaver HAL looks up. Android's own lives in
-/// system_server; a recovery runs no framework, so it gets its own.
-///
-/// No init rule starts it: the recovery starts it with the phone's other
-/// services, once the vendor partition is mounted, since it loads its two
-/// interface libraries from there and asks the secure element HAL for eSE1.
-/// The phone's configuration names it after the secure element and before
-/// the weaver. The service directory turns away a name no description
-/// declares, so the description goes where the directory reads them at boot.
-/// The rest of what it loads, libbinder_ndk and below, is the stock
-/// recovery's own: a newer build of the interface libraries asks libbinder_ndk
-/// for symbols the stock one lacks.
-const OMAPI_FILES: [(&str, &str, u32); 6] = [
-    ("system/bin/se_omapi", "system/bin/se_omapi", 0o755),
-    ("se_omapi.xml", "system/etc/vintf/manifest/se_omapi.xml", 0o644),
-    // The Thales weaver's own description: an odm that carries the weaver
-    // without one (the ColorOS port's) has the directory turn it away.
-    ("weaver-thales.xml", "system/etc/vintf/manifest/weaver-thales.xml", 0o644),
-    // se_omapi's two AIDL libraries, which the recovery does not carry; the
-    // copies are built for API 36 and patched to the recovery's API 35
-    // libbinder_ndk, with the one API 36 call answered by a no-op shim.
-    ("system/lib64/android.se.omapi-V1-ndk.so", "system/lib64/android.se.omapi-V1-ndk.so", 0o644),
-    ("system/lib64/android.hardware.secure_element-V1-ndk.so", "system/lib64/android.hardware.secure_element-V1-ndk.so", 0o644),
-    ("system/lib64/libbinder_ndk_shim36.so", "system/lib64/libbinder_ndk_shim36.so", 0o644),
-];
-
-/// Put the OMAPI service and its description into `rd`, from the folder
-/// `stage` holds them in.
-///
-/// A stock recovery that already carries the service keeps its own: the two
-/// would answer to the same name, and the second to register would replace
-/// the first.
-fn install_omapi(rd: &mut Ramdisk, stage: &Path, read: &impl Fn(&PathBuf) -> Result<Vec<u8>>) -> Result<()> {
-    let at = |name: &str| stage.join(name.replace('/', std::path::MAIN_SEPARATOR_STR));
-    let stock_omapi = rd.find(OMAPI_FILES[0].1).is_some();
-    for (from, to, mode) in OMAPI_FILES {
-        if rd.find(to).is_some() || (stock_omapi && !(from == "weaver-thales.xml" || from.starts_with("system/lib64/"))) {
-            continue;
-        }
-        let bytes = read(&at(from)).with_context(|| format!("--omapi: {} is not in {}", from, stage.display()))?;
-        rd.add(to, mode, bytes)?;
-    }
-    Ok(())
-}
-
 /// A property file without the lines that set any of `names`.
 fn without(props: &[u8], names: &[&str]) -> Vec<u8> {
     let mut out = Vec::with_capacity(props.len());
@@ -378,16 +265,6 @@ fn without(props: &[u8], names: &[&str]) -> Vec<u8> {
         }
     }
     out
-}
-
-/// Put a regular file into `rd`: a file already there has its contents
-/// replaced, so a build can be made on top of an image made before it.
-fn put(rd: &mut Ramdisk, name: &str, mode: u32, data: Vec<u8>) -> Result<()> {
-    if rd.find(name).is_some() {
-        rd.replace(name, data)
-    } else {
-        rd.add(name, mode, data)
-    }
 }
 
 /// Write `bytes`, the image `img` makes, to `out`.
@@ -498,15 +375,5 @@ ro.vendor.build.security_patch=2026-10-01\nro.vendor.build.security_patch_level=
         assert_eq!(out, b"a=1\n");
         let kept = without(b"a=1\nb=2", &BUILD_VERSION);
         assert_eq!(kept, b"a=1\nb=2");
-    }
-
-    #[test]
-    fn a_second_partition_is_named_where_it_can_only_be_one() {
-        for good in ["odm", "vendor_boot", "system-a", "vbmeta_system"] {
-            assert!(separate_partition(good).is_ok(), "{good} is a partition name");
-        }
-        for bad in ["", "recovery", "../recovery", "odm/../../../etc/passwd", "odm.img", "odm ", "ODM\n", "分区"] {
-            assert!(separate_partition(bad).is_err(), "{bad:?} is not a partition name");
-        }
     }
 }
