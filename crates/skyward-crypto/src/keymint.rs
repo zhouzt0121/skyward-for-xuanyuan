@@ -221,7 +221,7 @@ impl<'a> KeyMint<'a> {
                 // now; the one on disk is left as it is, so nothing of the
                 // phone's own is changed by reading it here.
                 let renewed = self
-                    .upgrade(key_blob, |call| Self::gcm_params(call, app_id, nonce))
+                    .upgrade(key_blob, |call| Self::binding(call, app_id))
                     .context("renew the key for the firmware running now")?;
                 self.begin(&renewed, app_id, nonce, note)?
             }
@@ -251,6 +251,18 @@ impl<'a> KeyMint<'a> {
         }
         parameter(call, TAG_NONCE, Value::Blob(nonce));
         parameter(call, TAG_PURPOSE, Value::Enum(VALUE_KEY_PURPOSE, PURPOSE_DECRYPT));
+    }
+
+    /// What a key is bound to, and nothing else, as renewing it takes: the
+    /// service answers a renewal handed the way the key is used (its block
+    /// mode, padding, nonce or purpose) with an invalid argument.
+    fn binding(call: &mut Parcel, app_id: &[u8]) {
+        if app_id.is_empty() {
+            call.i32(0);
+        } else {
+            call.i32(1);
+            parameter(call, TAG_APPLICATION_ID, Value::Blob(app_id));
+        }
     }
 
     /// Open a decryption with the key service and keep hold of it.
