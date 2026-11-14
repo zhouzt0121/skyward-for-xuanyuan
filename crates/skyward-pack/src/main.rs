@@ -205,7 +205,18 @@ fn main() -> Result<()> {
             rd.replace(paths::PROP_DEFAULT, props)?;
             img.ramdisk = rd.encode()?;
             let bytes = img.to_bytes()?;
-            write(&out, &img, &avb::footed(&bytes, "recovery", size, &Sha256::digest(&bytes))?)
+            // The bootloader gives the secure world the version and patch
+            // level the stock footer names; the system's keys were made
+            // under those, so the recovery's footer names the same.
+            let stock_props = avb::properties(&std::fs::read(&stock).with_context(|| format!("read {}", stock.display()))?);
+            for (key, value, _) in &stock_props {
+                println!("{key}={value}");
+            }
+            if !stock_props.iter().any(|(key, _, _)| key.ends_with(".security_patch")) {
+                eprintln!("warning: {} names no security patch in its footer; the data partition may not open", stock.display());
+            }
+            let props: Vec<u8> = stock_props.into_iter().flat_map(|(_, _, d)| d).collect();
+            write(&out, &img, &avb::footed(&bytes, "recovery", size, &Sha256::digest(&bytes), &props)?)
         }
         Cmd::Stock { config, out, partition } => {
             let stock = skyward_config::DeviceConfig::load(&config)?.stock.with_context(|| format!("{} names no stock build", config.display()))?;
