@@ -11,13 +11,11 @@ use std::path::Path;
 use std::str::FromStr;
 use std::sync::Mutex;
 
-/// Version of this build, shown on the About page and told to the update
-/// server: the three numbers Cargo takes, and the fork's own patch level
-/// after them, which Cargo has no room for. It is written here rather than
-/// taken from `CARGO_PKG_VERSION` for that reason, and the two are bumped
-/// together — a release is tagged `v` and this, as `v0.3.1.2`, and the next
-/// one is `0.3.1.3`.
-pub const VERSION: &str = "0.3.1.3";
+/// Version of this build, shown on the About page and told the update
+/// server. This fork numbers its releases in the xuanyuan repository, whose
+/// first was `v1.0.0`; this build is the one after it, and a release is
+/// tagged `v` and this, as `v1.0.1`.
+pub const VERSION: &str = "1.0.1";
 
 /// Who made this build, shown beside its version on the specs page's Recovery
 /// version card. Set at build time from `SKYWARD_BUILDER` by `build.rs`;
@@ -181,7 +179,7 @@ pub fn collect_with(cfg: &DeviceConfig, battery: Option<Battery>) -> Result<Devi
         ram_kib: mem_total(&read("/proc/meminfo")?)?,
         panel: (d.width > 0 && d.height > 0).then_some((d.width, d.height)),
         screen: d.diagonal,
-        os_version: system.get(&cfg.device.os_version_prop),
+        os_version: os_version(|name| system.get(name), &cfg.device.os_version_prop),
         android: system.get("ro.build.version.release"),
         locale: system.get("ro.product.locale"),
         security_patch: system
@@ -198,6 +196,24 @@ pub fn collect_with(cfg: &DeviceConfig, battery: Option<Battery>) -> Result<Devi
             verified: skyward_block::boot_param("androidboot.verifiedbootstate")?,
         },
     })
+}
+
+/// The installed system's own name for its release. A ported ColorOS leaves
+/// Xiaomi's `ro.mi.os.version.incremental` in the base system image, so that
+/// is asked only where ColorOS has not named a release of its own. An
+/// official HyperOS has no `ro.build.version.oplusrom`, and is named by the
+/// property the device configuration gives.
+pub fn os_version(get: impl Fn(&str) -> Option<String>, configured: &str) -> Option<String> {
+    if get("ro.build.version.oplusrom").is_some() {
+        let said = get("ro.build.version.oplusrom.display")
+            .or_else(|| get("ro.build.display.id.show"))
+            .or_else(|| get("ro.build.version.oplusrom"))?;
+        return Some(match said.starts_with("ColorOS") {
+            true => said,
+            false => format!("ColorOS {said}"),
+        });
+    }
+    get(configured).or_else(|| get("ro.build.display.id"))
 }
 
 /// Build properties of the system the About page describes.
@@ -301,6 +317,23 @@ pub fn installed_props(slot: Slot) -> Result<HashMap<String, String>> {
                 .with_context(|| format!("read {}", path.display()))?;
         }
     }
+    // A ported ColorOS keeps its own overrides in my_manifest and reads them
+    // after the system and vendor files; the release it shows and the vendor
+    // patch its keys were made under are there, while the system's own file
+    // still names Xiaomi's old build. Read it last, as its init does.
+    for m in &parts {
+        if base(m) != "system" {
+            continue;
+        }
+        let path = m.mount_point.join("my_manifest/build.prop");
+        match fs::metadata(&path) {
+            Err(e) if e.kind() == ErrorKind::NotFound => continue,
+            Err(e) => return Err(e).with_context(|| format!("stat {}", path.display())),
+            Ok(_) => {}
+        }
+        rsproperties::load_properties_from_file(&path, None, "u:r:init:s0", &mut props)
+            .with_context(|| format!("read {}", path.display()))?;
+    }
     Ok(props)
 }
 
@@ -322,8 +355,10 @@ pub struct KeyMintProps {
     pub vendor_security_patch: (String, String),
 }
 
-/// Read one name from the first of `files` that carries it.
+/// Read one name from the last of `files` that carries it: init reads them
+/// in this order, and a later file overrides what an earlier one said.
 fn from_files(files: &[&str], name: &str) -> Option<(String, String)> {
+    let mut found = None;
     for file in files {
         let Ok(text) = fs::read_to_string(file) else {
             continue;
@@ -332,12 +367,12 @@ fn from_files(files: &[&str], name: &str) -> Option<(String, String)> {
             let line = line.trim_end_matches('\r');
             if let Some(value) = line.strip_prefix(&format!("{name}=")) {
                 if !value.is_empty() {
-                    return Some((value.to_string(), (*file).to_string()));
+                    found = Some((value.to_string(), (*file).to_string()));
                 }
             }
         }
     }
-    None
+    found
 }
 
 /// The installed system's KeyMint version values, read from its own
@@ -351,6 +386,16 @@ pub fn keymint_props(fallback: &HashMap<String, String>) -> KeyMintProps {
         "/system/build.prop",
         "/mnt/system/system/build.prop",
         "/mnt/system/build.prop",
+        // A ported system may import a second file after its build.prop, as
+        // ColorOS's my_manifest does; init reads it later, so it wins there
+        // too, and the values here have to be the ones the key service saw
+        // when the system made its keys.
+        "/system_root/system/my_manifest/build.prop",
+        "/system_root/my_manifest/build.prop",
+        "/system/system/my_manifest/build.prop",
+        "/system/my_manifest/build.prop",
+        "/mnt/system/system/my_manifest/build.prop",
+        "/mnt/system/my_manifest/build.prop",
     ];
     let vendor = [
         "/vendor/build.prop",
@@ -372,6 +417,10 @@ pub fn keymint_props(fallback: &HashMap<String, String>) -> KeyMintProps {
             "the installed system's merged properties".to_string(),
         )
     };
+    // The vendor partition's own file first, then the system's, which in a
+    // ported system may override it after the vendor file was read.
+    let mut vendor_patch_files = vendor.to_vec();
+    vendor_patch_files.extend_from_slice(&system);
     let release = get("ro.build.version.release", "skyward.keymint.osver", &system);
     let release_or_codename = match get(
         "ro.build.version.release_or_codename",
@@ -404,7 +453,7 @@ pub fn keymint_props(fallback: &HashMap<String, String>) -> KeyMintProps {
         vendor_security_patch: get(
             "ro.vendor.build.security_patch",
             "skyward.keymint.venpatch",
-            &vendor,
+            &vendor_patch_files,
         ),
     }
 }
@@ -626,6 +675,27 @@ mod tests {
     }
 
     #[test]
+    fn a_port_is_named_by_its_own_release_and_an_official_build_by_the_configured_one() {
+        let coloros = [
+            ("ro.mi.os.version.incremental", "OS1.0.14.0.0.VNCCNXM"),
+            ("ro.build.version.oplusrom", "V17.0.0"),
+            ("ro.build.version.oplusrom.display", "17.0.1"),
+        ];
+        let get = |name: &str| coloros.iter().find(|(k, _)| *k == name).map(|(_, v)| v.to_string());
+        assert_eq!(
+            os_version(get, "ro.mi.os.version.incremental").as_deref(),
+            Some("ColorOS 17.0.1"),
+            "the ColorOS release wins over the Xiaomi base it was ported onto"
+        );
+        let hyper = [("ro.mi.os.version.incremental", "OS3.0.308.0.WMACNXM")];
+        let get = |name: &str| hyper.iter().find(|(k, _)| *k == name).map(|(_, v)| v.to_string());
+        assert_eq!(
+            os_version(get, "ro.mi.os.version.incremental").as_deref(),
+            Some("OS3.0.308.0.WMACNXM")
+        );
+    }
+
+    #[test]
     fn mem_total_from_meminfo() {
         // Values reported by a Xiaomi 17 Ultra.
         let text = "MemTotal:       15472464 kB\nMemFree:         2381608 kB\n";
@@ -650,19 +720,21 @@ mod tests {
     }
 
     #[test]
-    fn the_version_is_the_one_cargo_takes_and_the_fork_patch_level_after_it() {
-        // Cargo takes three numbers and no more, so the patch level the fork
-        // names its own releases with is written beside it; the two must not
-        // drift apart, or the build says it is one version and is another.
-        let cargo = env!("CARGO_PKG_VERSION");
+    fn the_version_is_the_one_the_fork_tags_its_releases_with() {
+        // This fork numbers its own releases after the first in the xuanyuan
+        // repository, not after the Cargo version it was forked from; the
+        // numbers and full stops are what the update check reads.
+        let parts: Vec<&str> = VERSION.split('.').collect();
         assert!(
-            VERSION.starts_with(cargo),
-            "the build's version {VERSION} begins with the {cargo} Cargo takes"
+            parts.len() == 3 || parts.len() == 4,
+            "{VERSION} is three numbers, or three and a patch level"
         );
-        assert!(
-            VERSION[cargo.len()..].starts_with('.'),
-            "the patch level follows the three numbers: {VERSION}"
-        );
+        for part in parts {
+            assert!(
+                part.parse::<u64>().is_ok(),
+                "{VERSION} is numbers and full stops only"
+            );
+        }
     }
 
     #[test]

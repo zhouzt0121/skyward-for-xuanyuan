@@ -355,6 +355,14 @@ pub struct Device {
     /// System property that carries the vendor OS version.
     #[serde(default = "default_os_version_prop")]
     pub os_version_prop: String,
+    /// Start the credential service, the secure element's HAL and the
+    /// weaver as root rather than as the user their scripts name: on a phone
+    /// whose QSEECom and secure element nodes are root's alone, the scripts'
+    /// `system` makes every call come back as though the secure world had
+    /// taken the credential and written no note. Nothing asks for it unless
+    /// the phone's build is known to need it.
+    #[serde(default)]
+    pub root_key_services: bool,
 }
 
 #[derive(Debug, Clone, Default, Deserialize)]

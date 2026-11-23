@@ -8,10 +8,11 @@ use serde::Deserialize;
 /// The repository this fork's releases are published in. This fork is the
 /// Xiaomi 15 Ultra (xuanyuan) alone, so it looks at its own releases and
 /// nowhere else.
-pub const REPOSITORY: &str = "zhouzt0121/skyward";
+pub const REPOSITORY: &str = "zhouzt0121/skyward-v0.2.2-for-xuanyuan";
 
 /// Where GitHub answers which release of this fork is the newest.
-pub const LATEST: &str = "https://api.github.com/repos/zhouzt0121/skyward/releases/latest";
+pub const LATEST: &str =
+    "https://api.github.com/repos/zhouzt0121/skyward-v0.2.2-for-xuanyuan/releases/latest";
 
 /// The version of GitHub's API the answer is read as.
 const API_VERSION: &str = "2022-11-28";
@@ -103,14 +104,32 @@ pub fn newest(answer: &str, codename: &str, running: &str) -> Result<Newest> {
     let this = Version::parse(running).with_context(|| format!("this build's version is {running}"))?;
     // The image is named skyward-, the tag, the phone's codename, and the
     // stock build it is made on, and is put on the release as it is - not
-    // zipped, so the phone downloads what it writes.
-    let start = format!("skyward-{tag}-{codename}-");
-    let build = match release.assets.into_iter().find(|a| a.name.starts_with(&start) && a.name.ends_with(".img")) {
+    // zipped. Older releases wrapped it in a zip and left the stock build
+    // off the name, so a zip is taken too, and the tag and codename alone
+    // are enough to tell it apart.
+    let start = format!("skyward-{tag}-{codename}");
+    // The codename has to end there: ishtar is not isht, and a name that
+    // goes on with another letter is another phone's.
+    let for_phone = |name: &str| {
+        name.starts_with(&start)
+            && matches!(
+                name.as_bytes().get(start.len()),
+                None | Some(b'-') | Some(b'.')
+            )
+    };
+    let image = |a: &&Asset| for_phone(&a.name) && a.name.ends_with(".img");
+    let zipped = |a: &&Asset| for_phone(&a.name) && a.name.ends_with(".zip");
+    let build = match release
+        .assets
+        .iter()
+        .find(image)
+        .or_else(|| release.assets.iter().find(zipped))
+    {
         None => None,
         Some(a) => {
             let sha256 = a.digest.as_deref().and_then(|d| d.strip_prefix("sha256:")).with_context(|| format!("GitHub gives no SHA-256 of {}", a.name))?;
             ensure!(sha256.len() == 64 && sha256.bytes().all(|b| b.is_ascii_hexdigit()), "GitHub gives {} the SHA-256 {sha256}", a.name);
-            Some(Build { sha256: sha256.to_lowercase(), name: a.name, url: a.url, link: a.browser_download_url, size: a.size })
+            Some(Build { sha256: sha256.to_lowercase(), name: a.name.clone(), url: a.url.clone(), link: a.browser_download_url.clone(), size: a.size })
         }
     };
     Ok(Newest { version: version.to_string(), newer: newest.newer_than(this), build, via: None })
@@ -400,6 +419,23 @@ mod tests {
         assert_eq!(locate_candidates(&agent, [url], "0.1.2").unwrap(), rewritten, "a proxy's own address of the file itself");
         let (url, _) = server("HTTP/1.1 302 Found\r\nLocation: /a?sig=1\r\nContent-Length: 0\r\n\r\n".into());
         assert!(locate_candidates(&agent, [url], "0.1.2").is_err(), "an address with no host of its own is no address to download from");
+    }
+
+    #[test]
+    fn a_release_that_zips_the_image_and_leaves_the_stock_off_is_taken() {
+        let answer = r#"{"tag_name":"v1.0.1","assets":[{"url":"https://api.github.com/repos/zhouzt0121/skyward-v0.2.2-for-xuanyuan/releases/assets/1","name":"skyward-v1.0.1-xuanyuan.zip","size":45882347,"digest":"sha256:2977b927b3e7665da14f077e7cf2ba4cf7495d2e4447ab2af48f23c6b9a49bba","browser_download_url":"https://github.com/zhouzt0121/skyward-v0.2.2-for-xuanyuan/releases/download/v1.0.1/skyward-v1.0.1-xuanyuan.zip"}]}"#;
+        let n = newest(answer, "xuanyuan", "1.0.0").unwrap();
+        assert!(n.newer);
+        assert_eq!(
+            n.build,
+            Some(Build {
+                name: "skyward-v1.0.1-xuanyuan.zip".into(),
+                url: "https://api.github.com/repos/zhouzt0121/skyward-v0.2.2-for-xuanyuan/releases/assets/1".into(),
+                link: "https://github.com/zhouzt0121/skyward-v0.2.2-for-xuanyuan/releases/download/v1.0.1/skyward-v1.0.1-xuanyuan.zip".into(),
+                size: 45882347,
+                sha256: "2977b927b3e7665da14f077e7cf2ba4cf7495d2e4447ab2af48f23c6b9a49bba".into(),
+            })
+        );
     }
 
     #[test]

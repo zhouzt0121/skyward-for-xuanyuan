@@ -49,10 +49,26 @@ pub struct Other {
     pub size: u64,
 }
 
-/// What the installed system calls itself, by its properties: HyperOS by
-/// the major version Xiaomi gives it, any other by its Android version;
-/// with the build it is, where it says.
+/// What the installed system calls itself, by its properties: ColorOS by its
+/// own release, HyperOS by the major version Xiaomi gives it, any other by
+/// its Android version; with the build it is, where it says.
 pub fn installed_name(props: &HashMap<String, String>, version_prop: &str) -> Named {
+    // A ColorOS port keeps Xiaomi's own properties in the base it was built
+    // on, so its own name is asked first and the Xiaomi one only after it.
+    if props.get("ro.build.version.oplusrom").is_some() {
+        let said = props
+            .get("ro.build.version.oplusrom.display")
+            .or_else(|| props.get("ro.build.version.oplusrom"))
+            .map(String::as_str)
+            .unwrap_or("");
+        let major = said.trim_start_matches('V').split('.').next().filter(|s| !s.is_empty());
+        let name = match major {
+            Some(major) => format!("ColorOS {major}"),
+            None => "ColorOS".into(),
+        };
+        let version = props.get("ro.build.display.id.show").or_else(|| props.get("ro.build.display.id")).cloned();
+        return Named { name, version };
+    }
     let name = match (props.get("ro.mi.os.version.code"), props.get("ro.build.version.release")) {
         (Some(code), _) => format!("HyperOS {code}"),
         (None, Some(release)) => format!("Android {release}"),
@@ -78,6 +94,19 @@ mod tests {
         assert_eq!(
             installed_name(&custom, "ro.mi.os.version.incremental"),
             Named { name: "Android 16".into(), version: Some("lineage_ishtar-userdebug 16 BP2A".into()) }
+        );
+        // A ColorOS port keeps Xiaomi's base in system/build.prop; its own
+        // my_manifest is what names it, and it must not be called HyperOS.
+        let coloros = props(&[
+            ("ro.mi.os.version.code", "14"),
+            ("ro.mi.os.version.incremental", "OS1.0.14.0.0.VNCCNXM"),
+            ("ro.build.version.oplusrom", "V17.0.0"),
+            ("ro.build.version.oplusrom.display", "17.0.1"),
+            ("ro.build.display.id.show", "PMA120_17.0.1.200(CN01)"),
+        ]);
+        assert_eq!(
+            installed_name(&coloros, "ro.mi.os.version.incremental"),
+            Named { name: "ColorOS 17".into(), version: Some("PMA120_17.0.1.200(CN01)".into()) }
         );
     }
 }

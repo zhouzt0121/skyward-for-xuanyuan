@@ -271,11 +271,11 @@ pub fn steps(phone: &Phone) -> Result<Vec<Step>> {
     })?;
     let registers = besides(phone, program, &credentials, alone);
     // The credential service talks to the secure world's trustlet through
-    // QSEECom. As the rc's `system` it cannot reach it on this phone; YARP and
-    // the xuanyuan recovery both run it as root, and so does this.
+    // QSEECom. On a phone whose nodes are root's alone, the rc's `system`
+    // cannot reach it, and the recovery runs it as root there.
     start(
         &mut out,
-        rooted(started(
+        rooted(phone, started(
             phone,
             program,
             ready(credentials, credentials_kind),
@@ -420,7 +420,7 @@ fn weaver(phone: &Phone) -> Result<Vec<Step>> {
             out.push(Step::ServeElements);
         }
     }
-    let mut weaver = rooted(started(
+    let mut weaver = rooted(phone, started(
         phone,
         program,
         Ready::Service(WEAVER.into()),
@@ -456,9 +456,9 @@ fn element(phone: &Phone, name: &str) -> Result<Started> {
     let registers = besides(phone, program, &own, |_| false);
     // The secure element's node is made by its driver as root's alone, and
     // the HAL asks the element for its vendor id over the ADSP before it can
-    // open the TA. Root opens the node however it is owned, and is what the
-    // xuanyuan recovery has been verified with.
-    Ok(rooted(started(
+    // open the TA. On a phone whose node is root's alone, root opens it
+    // however it is owned, and is what its recovery was verified with.
+    Ok(rooted(phone, started(
         phone,
         program,
         Ready::Service(own),
@@ -604,15 +604,24 @@ fn one<'a>(phone: &Phone, what: &str, candidates: Vec<&'a Program>) -> Result<Op
     Ok(None)
 }
 
-/// The same start, as root rather than the user the phone's rc names.
+/// The same start, as root rather than the user the phone's rc names, on a
+/// phone whose configuration says its key services have to run so.
 ///
 /// The credential service, the secure element's HAL and the weaver reach the
-/// secure world through QSEECom and the element's node. On xuanyuan those
+/// secure world through QSEECom and the element's node. On some phones those
 /// are root's, and running them as the rc's `system` makes every call come
 /// back as though the secure world had taken the credential and written no
-/// note. YARP runs them as root on this phone too.
-fn rooted(mut started: Started) -> Started {
-    started.service.user = Some("root".into());
+/// note. A phone whose build is known to need it asks for it in its
+/// configuration; every other phone keeps the user its scripts name.
+fn rooted(phone: &Phone, mut started: Started) -> Started {
+    if phone
+        .properties
+        .get("ro.skyward.root_key_services")
+        .map(String::as_str)
+        == Some("1")
+    {
+        started.service.user = Some("root".into());
+    }
     started
 }
 

@@ -33,12 +33,16 @@ pub struct Found {
 /// `libraries` is where the libraries the phone's partitions were built
 /// against are opened, on a phone that carries them as a bundle of their
 /// own: each of its programs is given the folder among its own.
-pub fn found(slot: skyward_vab::Slot, libraries: Option<&Path>) -> Result<Found> {
-    let mut phone = read(slot, libraries)?;
+pub fn found(
+    slot: skyward_vab::Slot,
+    libraries: Option<&Path>,
+    root_key_services: bool,
+) -> Result<Found> {
+    let mut phone = read(slot, libraries, root_key_services)?;
     let unnamed = naming::steps(&phone)?;
     if !unnamed.is_empty() {
         name(&unnamed)?;
-        phone = read(slot, libraries)?;
+        phone = read(slot, libraries, root_key_services)?;
     }
     Ok(Found {
         described: phone.told_of(),
@@ -51,8 +55,15 @@ pub fn found(slot: skyward_vab::Slot, libraries: Option<&Path>) -> Result<Found>
 /// bootloader's, with those the recovery has set beside them as the
 /// phone's init sets them, and the installed build's. `libraries` is as
 /// [`found`] takes it.
-fn read(slot: skyward_vab::Slot, libraries: Option<&Path>) -> Result<Phone> {
-    let properties = skyward_info::installed_props(slot)?;
+fn read(
+    slot: skyward_vab::Slot,
+    libraries: Option<&Path>,
+    root_key_services: bool,
+) -> Result<Phone> {
+    let mut properties = skyward_info::installed_props(slot)?;
+    if root_key_services {
+        properties.insert("ro.skyward.root_key_services".into(), "1".into());
+    }
     let mounted = skyward_vab::mounted_partitions(slot)?;
     let mut partitions = Vec::new();
     for name in PARTITIONS {

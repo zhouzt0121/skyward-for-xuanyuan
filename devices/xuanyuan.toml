@@ -5,6 +5,12 @@ model = "Xiaomi 15 Ultra"
 ab = true
 soc = { hans = "骁龙®8至尊版移动平台", hant = "Snapdragon® 8 Elite 行動平台", en = "Snapdragon® 8 Elite Mobile Platform" }
 os_version_prop = "ro.mi.os.version.incremental"
+# The credential service, the secure element's HAL and the weaver reach the
+# secure world through QSEECom and the element's node. On this phone those
+# are root's, and the scripts' `system` makes every call come back as though
+# the secure world had taken the credential and written no note; YARP runs
+# them as root here too. Other phones keep the user their scripts name.
+root_key_services = true
 
 [display]
 # The panel's own mode, persist.sys.miui_default_resolution in the odm

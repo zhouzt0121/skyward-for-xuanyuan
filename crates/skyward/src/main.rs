@@ -309,15 +309,22 @@ fn main() -> Result<()> {
         Cmd::Services { config } => {
             let slot = booted_slot()?;
             let props = skyward_info::installed_props(slot)?;
-            let services: Vec<Started> = DeviceConfig::load(&config)?
+            let cfg = DeviceConfig::load(&config)?;
+            let services: Vec<Started> = cfg
                 .services
-                .into_iter()
+                .iter()
                 .filter(|s| s.runs_on(&props))
+                .cloned()
                 .map(Started::from)
                 .collect();
             let libraries = secure::libraries()?;
             services::start(&services, libraries.as_deref())?;
-            keys::start(&keys::found(slot, libraries.as_deref())?.steps?)?;
+            keys::start(&keys::found(
+                slot,
+                libraries.as_deref(),
+                cfg.device.root_key_services,
+            )?
+            .steps?)?;
             loop {
                 std::thread::park();
             }
@@ -325,7 +332,7 @@ fn main() -> Result<()> {
         #[cfg(target_os = "android")]
         Cmd::Keys => {
             for line in keys::describe(
-                &keys::found(booted_slot()?, secure::libraries()?.as_deref())?.steps?,
+                &keys::found(booted_slot()?, secure::libraries()?.as_deref(), false)?.steps?,
             ) {
                 println!("{line}");
             }
@@ -532,9 +539,10 @@ fn main() -> Result<()> {
             // keys are read from the partitions again, as it read them;
             // where they do not show, it started none.
             let mut programs = cfg.services.clone();
-            match booted_slot()
-                .and_then(|slot| keys::found(slot, secure::libraries()?.as_deref())?.steps)
-            {
+            match booted_slot().and_then(|slot| {
+                keys::found(slot, secure::libraries()?.as_deref(), cfg.device.root_key_services)
+                    .map(|found| found.steps)
+            })? {
                 Ok(steps) => programs.extend(keys::programs(&steps)),
                 Err(e) => eprintln!("the programs of the phone's keys are not known: {e:#}"),
             }
@@ -1246,8 +1254,9 @@ fn prepare(cfg: &DeviceConfig, slot: skyward_vab::Slot) -> Result<Vec<skyward_co
                     m.filesystem
                 ))?;
             }
-            let found =
-                secure::libraries().and_then(|libraries| keys::found(slot, libraries.as_deref()));
+            let found = secure::libraries().and_then(|libraries| {
+                keys::found(slot, libraries.as_deref(), cfg.device.root_key_services)
+            });
             let steps = found
                 .as_ref()
                 .ok()
