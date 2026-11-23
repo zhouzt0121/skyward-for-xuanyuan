@@ -8,11 +8,11 @@ use serde::Deserialize;
 /// The repository this fork's releases are published in. This fork is the
 /// Xiaomi 15 Ultra (xuanyuan) alone, so it looks at its own releases and
 /// nowhere else.
-pub const REPOSITORY: &str = "zhouzt0121/skyward-v0.2.2-for-xuanyuan";
+pub const REPOSITORY: &str = "zhouzt0121/skyward-for-xuanyuan";
 
 /// Where GitHub answers which release of this fork is the newest.
 pub const LATEST: &str =
-    "https://api.github.com/repos/zhouzt0121/skyward-v0.2.2-for-xuanyuan/releases/latest";
+    "https://api.github.com/repos/zhouzt0121/skyward-for-xuanyuan/releases/latest";
 
 /// The version of GitHub's API the answer is read as.
 const API_VERSION: &str = "2022-11-28";
@@ -423,15 +423,15 @@ mod tests {
 
     #[test]
     fn a_release_that_zips_the_image_and_leaves_the_stock_off_is_taken() {
-        let answer = r#"{"tag_name":"v1.0.1","assets":[{"url":"https://api.github.com/repos/zhouzt0121/skyward-v0.2.2-for-xuanyuan/releases/assets/1","name":"skyward-v1.0.1-xuanyuan.zip","size":45882347,"digest":"sha256:2977b927b3e7665da14f077e7cf2ba4cf7495d2e4447ab2af48f23c6b9a49bba","browser_download_url":"https://github.com/zhouzt0121/skyward-v0.2.2-for-xuanyuan/releases/download/v1.0.1/skyward-v1.0.1-xuanyuan.zip"}]}"#;
+        let answer = r#"{"tag_name":"v1.0.1","assets":[{"url":"https://api.github.com/repos/zhouzt0121/skyward-for-xuanyuan/releases/assets/1","name":"skyward-v1.0.1-xuanyuan.zip","size":45882347,"digest":"sha256:2977b927b3e7665da14f077e7cf2ba4cf7495d2e4447ab2af48f23c6b9a49bba","browser_download_url":"https://github.com/zhouzt0121/skyward-for-xuanyuan/releases/download/v1.0.1/skyward-v1.0.1-xuanyuan.zip"}]}"#;
         let n = newest(answer, "xuanyuan", "1.0.0").unwrap();
         assert!(n.newer);
         assert_eq!(
             n.build,
             Some(Build {
                 name: "skyward-v1.0.1-xuanyuan.zip".into(),
-                url: "https://api.github.com/repos/zhouzt0121/skyward-v0.2.2-for-xuanyuan/releases/assets/1".into(),
-                link: "https://github.com/zhouzt0121/skyward-v0.2.2-for-xuanyuan/releases/download/v1.0.1/skyward-v1.0.1-xuanyuan.zip".into(),
+                url: "https://api.github.com/repos/zhouzt0121/skyward-for-xuanyuan/releases/assets/1".into(),
+                link: "https://github.com/zhouzt0121/skyward-for-xuanyuan/releases/download/v1.0.1/skyward-v1.0.1-xuanyuan.zip".into(),
                 size: 45882347,
                 sha256: "2977b927b3e7665da14f077e7cf2ba4cf7495d2e4447ab2af48f23c6b9a49bba".into(),
             })
