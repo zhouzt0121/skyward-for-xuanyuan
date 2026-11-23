@@ -23,3 +23,7 @@ notes/
 # Scratch space of a working session: mirrors of another fork, and the token
 # that reads one, none of which belongs in this history.
 .tmp/
+
+# Built images and the stock partitions they are packed on.
+out/
+stock/
