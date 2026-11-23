@@ -243,6 +243,17 @@ fn main() -> Result<()> {
                 .with_context(|| format!("{} is not in the ramdisk", paths::PROP_DEFAULT))?
                 .data;
             let mut props = without(stock_props, &BUILD_VERSION);
+            // The service directory is the recovery's own program, so it
+            // numbers its methods as the recovery was built, not as the
+            // installed system is. Keep the recovery's own API level under a
+            // name of its own before the system's is adopted into
+            // ro.build.version.sdk for the key service.
+            if let Some(sdk) = String::from_utf8_lossy(stock_props)
+                .lines()
+                .find_map(|line| line.trim_end_matches('\r').strip_prefix("ro.build.version.sdk="))
+            {
+                props.extend_from_slice(format!("\nro.skyward.recovery.sdk={sdk}\n").as_bytes());
+            }
             props.extend_from_slice(
                 b"\nro.secure=0\nro.adb.secure=0\nro.debuggable=1\nro.ota.allow_downgrade=true\n",
             );

@@ -41,12 +41,21 @@ fn methods_of(sdk: u32) -> Methods {
     }
 }
 
-/// The recovery's own version, which its property files give.
-const SDK: &str = "ro.build.version.sdk";
+/// The recovery's own version, which its property files give. The installed
+/// system's API level is adopted into `ro.build.version.sdk` so the key
+/// service sees the build its keys were made under, but the service
+/// directory's method numbering is the recovery's own, not the installed
+/// system's; it is kept under a name of its own so adopting the system's
+/// does not move it.
+const SDK: &str = "ro.skyward.recovery.sdk";
 
 fn methods() -> Result<Methods> {
-    let sdk = skyward_sys::prop(SDK).with_context(|| format!("the recovery says no {SDK}"))?;
-    Ok(methods_of(sdk.parse().with_context(|| format!("{SDK} is {sdk:?}"))?))
+    let sdk = skyward_sys::prop(SDK)
+        .or_else(|| skyward_sys::prop("ro.build.version.sdk"))
+        .with_context(|| format!("the recovery says no {SDK}"))?;
+    Ok(methods_of(
+        sdk.parse().with_context(|| format!("{SDK} is {sdk:?}"))?,
+    ))
 }
 
 /// Every dump priority a service can register at, and the one a service
