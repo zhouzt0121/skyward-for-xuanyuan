@@ -17,9 +17,10 @@ use std::time::{Duration, Instant};
 /// properties as they are now.
 const KEYMINT_PROGRAM: &str = "/vendor/bin/hw/android.hardware.security.keymint-service-qti";
 
-const BUILD_VERSION: [&str; 4] = [
+const BUILD_VERSION: [&str; 5] = [
     "ro.build.version.release",
     "ro.build.version.release_or_codename",
+    "ro.build.version.sdk",
     "ro.build.version.security_patch",
     "ro.vendor.build.security_patch",
 ];

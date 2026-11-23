@@ -316,6 +316,8 @@ pub fn installed_props(slot: Slot) -> Result<HashMap<String, String>> {
 pub struct KeyMintProps {
     pub release: (String, String),
     pub release_or_codename: (String, String),
+    pub sdk: (String, String),
+    pub sdk_full: (String, String),
     pub security_patch: (String, String),
     pub vendor_security_patch: (String, String),
 }
@@ -388,6 +390,12 @@ pub fn keymint_props(fallback: &HashMap<String, String>) -> KeyMintProps {
     KeyMintProps {
         release,
         release_or_codename,
+        sdk: get("ro.build.version.sdk", "skyward.keymint.ossdk", &system),
+        sdk_full: get(
+            "ro.build.version.sdk_full",
+            "skyward.keymint.ossdkfull",
+            &system,
+        ),
         security_patch: get(
             "ro.build.version.security_patch",
             "skyward.keymint.ospatch",

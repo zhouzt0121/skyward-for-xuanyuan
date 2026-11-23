@@ -410,9 +410,11 @@ fn partition_size(stock: &Path) -> Result<usize> {
 /// build is running, and keys the installed system made are refused when
 /// they say the wrong one, so they are left out here for the recovery to
 /// fill in from the installed system once it has that mounted.
-const BUILD_VERSION: [&str; 4] = [
+const BUILD_VERSION: [&str; 6] = [
     "ro.build.version.release",
     "ro.build.version.release_or_codename",
+    "ro.build.version.sdk",
+    "ro.build.version.sdk_full",
     "ro.build.version.security_patch",
     "ro.vendor.build.security_patch",
 ];
@@ -539,7 +541,7 @@ mod tests {
 
     #[test]
     fn the_lines_that_set_a_name_are_the_only_ones_left_out() {
-        let props = b"ro.build.id=TQ\nro.build.version.release=13\nro.build.version.release_or_codename=13\nro.product.name=ishtar\n\
+        let props = b"ro.build.id=TQ\nro.build.version.release=13\nro.build.version.release_or_codename=13\nro.build.version.sdk=33\nro.build.version.sdk_full=33.0\nro.product.name=ishtar\n\
 ro.vendor.build.security_patch=2026-10-01\nro.vendor.build.security_patch_level=1\n";
         let out = without(props, &BUILD_VERSION);
         let text = String::from_utf8(out).expect("property files are text");
@@ -551,6 +553,14 @@ ro.vendor.build.security_patch=2026-10-01\nro.vendor.build.security_patch_level=
         assert!(
             !text.contains("ro.build.version.release_or_codename=13"),
             "the newer version name is left out too"
+        );
+        assert!(
+            !text.contains("ro.build.version.sdk=33"),
+            "the API level is left out too"
+        );
+        assert!(
+            !text.contains("ro.build.version.sdk_full=33.0"),
+            "the full API level is left out too"
         );
         assert!(
             text.contains("ro.vendor.build.security_patch_level=1"),

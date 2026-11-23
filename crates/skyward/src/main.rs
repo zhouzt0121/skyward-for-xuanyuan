@@ -1034,14 +1034,13 @@ fn mount_firmware(partition: &str) -> Result<()> {
     ))
 }
 
-/// Set the four values the phone's own secure services read to tell the
-/// secure world which build is running (the system's version, the newer name
-/// for it, the system's patch level, and the vendor partition's patch level)
-/// to the installed system's, read from
-/// the partitions that own the names rather than from the merged set, where a
-/// ported system's other maker's files could have replaced them. An earlier
-/// run of the recovery service may have set one already, and init sets such a
-/// property only once.
+/// Set the values the phone's own secure services read to tell the secure
+/// world which build is running (the system's version, the newer name for it,
+/// the API level, the system's patch level, and the vendor partition's patch
+/// level) to the installed system's, read from the partitions that own the
+/// names rather than from the merged set, where a ported system's other
+/// maker's files could have replaced them. An earlier run of the recovery
+/// service may have set one already, and init sets such a property only once.
 #[cfg(target_os = "android")]
 fn adopt_installed_version(props: &std::collections::HashMap<String, String>) -> Result<()> {
     let values = skyward_info::keymint_props(props);
@@ -1051,6 +1050,12 @@ fn adopt_installed_version(props: &std::collections::HashMap<String, String>) ->
             "ro.build.version.release_or_codename",
             &values.release_or_codename,
         ),
+        // The key service names the build a key was made under by API level,
+        // not by the release string alone. A recovery's own is older than the
+        // system's, and a key of 37 opened while 35 is named says it needs an
+        // upgrade, and refuses the upgrade as one to an older build.
+        ("ro.build.version.sdk", &values.sdk),
+        ("ro.build.version.sdk_full", &values.sdk_full),
         ("ro.build.version.security_patch", &values.security_patch),
         (
             "ro.vendor.build.security_patch",
@@ -1058,6 +1063,11 @@ fn adopt_installed_version(props: &std::collections::HashMap<String, String>) ->
         ),
     ];
     for (name, (value, source)) in set {
+        // A system before API levels had a full form need not name one.
+        if value.is_empty() && name == "ro.build.version.sdk_full" {
+            skyward_sys::kmsg(&format!("{name} is not named by the installed system; left alone"))?;
+            continue;
+        }
         anyhow::ensure!(
             !value.is_empty(),
             "no value for {name}: the installed build and any skyward.keymint. override name none"
