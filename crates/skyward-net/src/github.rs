@@ -1,6 +1,7 @@
 //! Skyward's own releases on GitHub: which is the newest, and the image in
 //! it for this phone, as the release workflow names it.
 
+use crate::mirror;
 use anyhow::{bail, ensure, Context, Result};
 use serde::Deserialize;
 
@@ -24,6 +25,9 @@ pub struct Newest {
     pub newer: bool,
     /// Its build for the phone; none when it has none.
     pub build: Option<Build>,
+    /// The mirror that answered in GitHub's place, such as gh-proxy.com; none
+    /// where GitHub itself answered.
+    pub via: Option<String>,
 }
 
 /// A phone's build in a release, which is Skyward's image for the phone.
@@ -45,9 +49,23 @@ pub struct Build {
 impl Build {
     /// Where to download the image from, in the order to try: the file's own
     /// short-lived address, where GitHub's API gave one, then the release's
-    /// link on github.com, which some networks do not reach.
+    /// link on github.com; then the mirrors of each of those, for the
+    /// networks that reach neither. GitHub's own addresses come first, so a
+    /// network that reaches GitHub never goes through a mirror at all, and
+    /// the digest the answer gave still gates whatever arrives from one.
     pub fn sources(&self, located: Option<String>) -> Vec<String> {
-        located.into_iter().chain([self.link.clone()]).collect()
+        let direct: Vec<String> = located.into_iter().chain([self.link.clone()]).collect();
+        let mut out = direct.clone();
+        for url in &direct {
+            // The address itself is the first candidate and is already here:
+            // its mirrors follow it.
+            for candidate in mirror::candidates(url).into_iter().skip(1) {
+                if !out.contains(&candidate) {
+                    out.push(candidate);
+                }
+            }
+        }
+        out
     }
 }
 
@@ -81,8 +99,8 @@ pub fn newest(answer: &str, codename: &str, running: &str) -> Result<Newest> {
     let release: Release = serde_json::from_str(answer).context("read GitHub's answer")?;
     let tag = release.tag_name;
     let version = tag.strip_prefix('v').with_context(|| format!("the newest release is tagged {tag}, which is not v and a version"))?;
-    let newest = semver::Version::parse(version).with_context(|| format!("the newest release is tagged {tag}"))?;
-    let this = semver::Version::parse(running).with_context(|| format!("this build's version is {running}"))?;
+    let newest = Version::parse(version).with_context(|| format!("the newest release is tagged {tag}"))?;
+    let this = Version::parse(running).with_context(|| format!("this build's version is {running}"))?;
     // The image is named skyward-, the tag, the phone's codename, and the
     // stock build it is made on, and is put on the release as it is - not
     // zipped, so the phone downloads what it writes.
@@ -95,31 +113,133 @@ pub fn newest(answer: &str, codename: &str, running: &str) -> Result<Newest> {
             Some(Build { sha256: sha256.to_lowercase(), name: a.name, url: a.url, link: a.browser_download_url, size: a.size })
         }
     };
-    Ok(Newest { version: version.to_string(), newer: newest > this, build })
+    Ok(Newest { version: version.to_string(), newer: newest.newer_than(this), build, via: None })
+}
+
+/// A version as the fork names its releases: the three numbers Cargo takes,
+/// and the fork's own patch level after them, as `0.3.1.2`. A release named
+/// the way upstream names them has the three numbers and no patch level.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct Version {
+    numbers: (u64, u64, u64),
+    patch: Option<u64>,
+}
+
+impl Version {
+    fn parse(text: &str) -> Result<Version> {
+        let parts: Vec<&str> = text.split('.').collect();
+        let count = match parts.len() {
+            3 => 3,
+            4 => 4,
+            _ => bail!("{text:?} is not a version, which is three numbers or three and the fork's patch level after them"),
+        };
+        let mut numbers = [0u64; 4];
+        for (at, part) in parts.iter().enumerate() {
+            numbers[at] = part.parse().with_context(|| format!("{text:?} is not a version, which is numbers and full stops"))?;
+        }
+        Ok(Version { numbers: (numbers[0], numbers[1], numbers[2]), patch: (count == 4).then_some(numbers[3]) })
+    }
+
+    /// Whether `self`, a release, is newer than `other`, the build that asks.
+    /// Two names of the same kind are compared number by number; the two
+    /// kinds are not compared at all, since the fork's patch level does not
+    /// order against the three numbers upstream names its releases with — a
+    /// build with a patch level is only looked at against releases that have
+    /// one, and one without it against releases without it.
+    fn newer_than(self, other: Version) -> bool {
+        match (self.patch, other.patch) {
+            (Some(mine), Some(theirs)) => (self.numbers, mine) > (other.numbers, theirs),
+            (None, None) => self.numbers > other.numbers,
+            _ => false,
+        }
+    }
 }
 
 /// Ask GitHub for Skyward's newest release, and its build for the phone
-/// `codename` names, as the build of version `running`.
+/// `codename` names, as the build of version `running`: of GitHub's own
+/// address, and then of each mirror of it, while the network allows them.
 pub fn ask(agent: &ureq::Agent, codename: &str, running: &str) -> Result<Newest> {
+    ask_candidates(agent, mirror::candidates(LATEST), codename, running)
+}
+
+/// Ask each of `urls` in turn for Skyward's newest release, and take the
+/// first answer that gives one. Where none does, the failure told is the
+/// first, GitHub's own, so that it names api.github.com rather than a mirror
+/// that was tried after it.
+fn ask_candidates<I>(agent: &ureq::Agent, urls: I, codename: &str, running: &str) -> Result<Newest>
+where
+    I: IntoIterator<Item = String>,
+{
+    let mut first = None;
+    for url in urls {
+        match ask_at(agent, &url, codename, running) {
+            Ok(mut newest) => {
+                newest.via = if url == LATEST { None } else { mirror::host(&url) };
+                return Ok(newest);
+            }
+            Err(e) => {
+                let _ = first.get_or_insert(e);
+            }
+        }
+    }
+    match first {
+        Some(e) => Err(e),
+        None => bail!("ask {LATEST}"),
+    }
+}
+
+/// Ask `url`, GitHub's own address or a mirror of it, for Skyward's newest
+/// release, and its build for the phone `codename` names, as the build of
+/// version `running`.
+fn ask_at(agent: &ureq::Agent, url: &str, codename: &str, running: &str) -> Result<Newest> {
     let mut response = agent
-        .get(LATEST)
+        .get(url)
         .header("Accept", "application/vnd.github+json")
         .header("X-GitHub-Api-Version", API_VERSION)
         .header("User-Agent", format!("Skyward/{running}"))
         .call()
-        .with_context(|| format!("ask {LATEST}"))?;
+        .with_context(|| format!("ask {url}"))?;
     let status = response.status();
-    let body = response.body_mut().read_to_string().with_context(|| format!("read the answer of {LATEST}"))?;
+    let body = response.body_mut().read_to_string().with_context(|| format!("read the answer of {url}"))?;
     if !status.is_success() {
         bail!(refusal(status, &body));
     }
     newest(&body, codename, running)
 }
 
-/// Where the file a build's `url` hands out is now, as GitHub's API sends
-/// the build of version `running` that asks for it on: a short-lived
-/// address of the file itself, away from github.com.
+/// Where the file a build's `url` hands out is now, as GitHub's API sends the
+/// build of version `running` that asks for it on: a short-lived address of
+/// the file itself, away from github.com. A mirror of the API may send it on
+/// to an address of its own, and that is taken too.
 pub fn locate(agent: &ureq::Agent, url: &str, running: &str) -> Result<String> {
+    locate_candidates(agent, mirror::candidates(url), running)
+}
+
+/// Ask each of `urls` in turn where the file it hands out is, and take the
+/// first address given. Where none gives one, the failure told is the first,
+/// GitHub's own.
+fn locate_candidates<I>(agent: &ureq::Agent, urls: I, running: &str) -> Result<String>
+where
+    I: IntoIterator<Item = String>,
+{
+    let mut first = None;
+    for url in urls {
+        match locate_at(agent, &url, running) {
+            Ok(location) => return Ok(location),
+            Err(e) => {
+                let _ = first.get_or_insert(e);
+            }
+        }
+    }
+    match first {
+        Some(e) => Err(e),
+        None => bail!("no address was given to ask where the build's file is"),
+    }
+}
+
+/// Ask `url`, GitHub's own address or a mirror of it, where the file it hands
+/// out is now.
+fn locate_at(agent: &ureq::Agent, url: &str, running: &str) -> Result<String> {
     let mut response = agent
         .get(url)
         .header("Accept", "application/octet-stream")
@@ -133,11 +253,25 @@ pub fn locate(agent: &ureq::Agent, url: &str, running: &str) -> Result<String> {
     let status = response.status();
     if status.is_redirection() {
         let location = response.headers().get(ureq::http::header::LOCATION).with_context(|| format!("GitHub answered {status}, and names no address"))?;
-        return Ok(location.to_str().context("GitHub names an address that is not text")?.to_string());
+        let location = location.to_str().context("GitHub names an address that is not text")?;
+        // A prefix proxy sends the download on to its own address of the file,
+        // or to the file itself: whatever absolute https address it names is
+        // where to go on from.
+        ensure!(absolute_https(location), "GitHub answers {status}, and names {location}, which is no address to download the file from");
+        return Ok(location.to_string());
     }
     ensure!(!status.is_success(), "GitHub sends the file itself in its answer, at no address of its own");
     let body = response.body_mut().read_to_string().with_context(|| format!("read the answer of {url}"))?;
     bail!(refusal(status, &body))
+}
+
+/// Whether `url` is an absolute https address, as an address to download a
+/// file from must be: one that names a host, and asks for it over https.
+fn absolute_https(url: &str) -> bool {
+    match url.strip_prefix("https://") {
+        Some(rest) => !rest.is_empty() && !rest.starts_with('/'),
+        None => false,
+    }
 }
 
 /// Why GitHub turned a question down, as it says, as when too many questions
@@ -176,11 +310,30 @@ mod tests {
     }
 
     #[test]
-    fn an_image_is_downloaded_from_where_github_sends_it_then_from_its_link() {
+    fn an_image_is_downloaded_from_where_github_sends_it_then_from_its_link_then_from_a_mirror_of_each() {
         let build = newest(ANSWERED_013, "ishtar", "0.1.2").unwrap().build.unwrap();
         let link = "https://github.com/Rinrroy/skyward-for-haotian/releases/download/v0.1.3/skyward-v0.1.3-ishtar-OS3.0.308.0.WMACNXM.img";
-        assert_eq!(build.sources(Some("https://release-assets.githubusercontent.com/a?sig=1".into())), ["https://release-assets.githubusercontent.com/a?sig=1", link]);
-        assert_eq!(build.sources(None), [link], "where GitHub's API gave no address");
+        let located = "https://release-assets.githubusercontent.com/a?sig=1";
+        // Every address GitHub gave comes before any mirror of one: a network
+        // that reaches GitHub does not go through a mirror at all.
+        assert_eq!(
+            build.sources(Some(located.into())),
+            [
+                located.to_string(),
+                link.to_string(),
+                format!("https://gh-proxy.com/{located}"),
+                format!("https://ghfast.top/{located}"),
+                format!("https://ghproxy.net/{located}"),
+                format!("https://gh-proxy.com/{link}"),
+                format!("https://ghfast.top/{link}"),
+                format!("https://ghproxy.net/{link}"),
+            ]
+        );
+        assert_eq!(
+            build.sources(None),
+            [link.to_string(), format!("https://gh-proxy.com/{link}"), format!("https://ghfast.top/{link}"), format!("https://ghproxy.net/{link}")],
+            "where GitHub's API gave no address"
+        );
     }
 
     /// A server on this computer that answers one request with `answer`,
@@ -220,11 +373,55 @@ mod tests {
     }
 
     #[test]
+    fn the_answer_of_a_mirror_is_taken_after_github_s_own_is_turned_down() {
+        let agent = crate::http::agent(Default::default());
+        let why = r#"{"message":"API rate limit exceeded for 203.0.113.7"}"#;
+        let refused = || format!("HTTP/1.1 403 Forbidden\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{why}", why.len());
+        let (direct, _) = server(refused());
+        let (mirror, held) = server(format!("HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{ANSWERED_013}", ANSWERED_013.len()));
+        let answered = ask_candidates(&agent, [direct, mirror.clone()], "ishtar", "0.1.2").unwrap();
+        assert_eq!(answered.version, "0.1.3", "the mirror's answer, after GitHub's own was turned down");
+        assert!(answered.newer);
+        assert_eq!(answered.via.as_deref(), mirror.split('/').nth(2), "the mirror that answered is named by its host");
+        let request = held.join().unwrap().to_lowercase();
+        assert!(request.contains("accept: application/vnd.github+json\r\n"), "the mirror is asked as GitHub is: {request}");
+        // Where no mirror answers either, the failure told is GitHub's own.
+        let (direct, _) = server(refused());
+        let (mirror, _) = server(refused());
+        let e = ask_candidates(&agent, [direct, mirror], "ishtar", "0.1.2").unwrap_err();
+        assert_eq!(e.to_string(), "GitHub answered 403 Forbidden: API rate limit exceeded for 203.0.113.7", "the first failure, which names api.github.com");
+    }
+
+    #[test]
+    fn an_address_a_mirror_sends_the_file_on_to_is_taken_and_one_that_names_no_host_is_not() {
+        let agent = crate::http::agent(Default::default());
+        let rewritten = "https://gh-proxy.com/https://release-assets.githubusercontent.com/a?sig=1";
+        let (url, _) = server(format!("HTTP/1.1 302 Found\r\nLocation: {rewritten}\r\nContent-Length: 0\r\n\r\n"));
+        assert_eq!(locate_candidates(&agent, [url], "0.1.2").unwrap(), rewritten, "a proxy's own address of the file itself");
+        let (url, _) = server("HTTP/1.1 302 Found\r\nLocation: /a?sig=1\r\nContent-Length: 0\r\n\r\n".into());
+        assert!(locate_candidates(&agent, [url], "0.1.2").is_err(), "an address with no host of its own is no address to download from");
+    }
+
+    #[test]
     fn a_release_is_newer_only_than_an_older_build() {
         assert!(!newest(ANSWERED_013, "ishtar", "0.1.3").unwrap().newer, "the same version");
         assert!(!newest(ANSWERED_013, "ishtar", "0.2.0").unwrap().newer, "a build ahead of every release");
-        assert!(newest(ANSWERED_013, "ishtar", "0.1.3-rc.1").unwrap().newer, "a build before the release it led to");
+        assert!(newest(ANSWERED_013, "ishtar", "0.1.3-rc.1").is_err(), "a version of numbers and full stops only");
         assert!(newest(ANSWERED_013, "ishtar", "0.1").is_err(), "a version this build cannot have");
+    }
+
+    #[test]
+    fn a_release_with_the_fork_patch_level_is_only_compared_with_builds_that_have_one() {
+        let tagged = |tag: &str| ANSWERED_013.replace("\"tag_name\":\"v0.1.3\"", &format!("\"tag_name\":\"v{tag}\""));
+        let newer = |tag: &str, running: &str| newest(&tagged(tag), "ishtar", running).unwrap().newer;
+        assert!(newer("0.3.1.3", "0.3.1.2"), "the patch level after the build's");
+        assert!(!newer("0.3.1.2", "0.3.1.2"), "the same version");
+        assert!(!newer("0.3.1.1", "0.3.1.2"), "a patch level before the build's");
+        assert!(newer("0.3.2.0", "0.3.1.9"), "the three numbers come first");
+        assert!(newer("0.3.3", "0.3.2"), "two releases without a patch level");
+        assert!(!newer("0.3.2", "0.3.1.2"), "a release named as upstream names them says nothing of the fork's own builds");
+        assert!(!newer("0.3.1.2", "0.3.2"), "and the other way round");
+        assert!(newest(&tagged("0.3.1.2.3"), "ishtar", "0.3.1.2").is_err(), "more numbers than the fork names");
     }
 
     #[test]

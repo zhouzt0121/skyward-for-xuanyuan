@@ -34,7 +34,9 @@ fn read_file() -> Result<Kept> {
         Ok(text) => match Settings::read(&text) {
             Ok(settings) => Ok(Kept::Settings(settings)),
             Err(e) => {
-                skyward_sys::kmsg(&format!("{FILE} does not read as settings, and is written afresh: {e:#}"))?;
+                skyward_sys::kmsg(&format!(
+                    "{FILE} does not read as settings, and is written afresh: {e:#}"
+                ))?;
                 Ok(Kept::Nothing)
             }
         },
@@ -58,10 +60,14 @@ pub fn write(settings: &Settings) -> Result<()> {
 fn write_file(settings: &Settings) -> Result<()> {
     fs::create_dir_all(FOLDER).with_context(|| format!("make {FOLDER}"))?;
     let mut file = File::create(WRITING).with_context(|| format!("make {WRITING}"))?;
-    file.write_all(settings.text().as_bytes()).with_context(|| format!("write {WRITING}"))?;
-    file.sync_all().with_context(|| format!("write {WRITING}"))?;
+    file.write_all(settings.text().as_bytes())
+        .with_context(|| format!("write {WRITING}"))?;
+    file.sync_all()
+        .with_context(|| format!("write {WRITING}"))?;
     fs::rename(WRITING, FILE).with_context(|| format!("move {WRITING} over {FILE}"))?;
-    File::open(FOLDER).and_then(|folder| folder.sync_all()).with_context(|| format!("write {FOLDER}"))
+    File::open(FOLDER)
+        .and_then(|folder| folder.sync_all())
+        .with_context(|| format!("write {FOLDER}"))
 }
 
 /// Do `work` on /metadata, mounted read-only for the moment where it is not

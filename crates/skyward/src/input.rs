@@ -1,4 +1,4 @@
-use anyhow::{anyhow, Context, Result};
+use anyhow::{Context, Result, anyhow};
 use evdev::raw_stream::RawDevice;
 use evdev::{AbsoluteAxisCode, EventSummary, InputEvent, KeyCode, PropType, SynchronizationCode};
 use skyward_config::Write;
@@ -9,7 +9,7 @@ use std::ffi::CString;
 use std::fs;
 use std::io::{self, ErrorKind};
 use std::os::fd::{AsRawFd, FromRawFd, OwnedFd, RawFd};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 pub enum Event {
     /// A touch and when the panel reported it, on [`monotonic_ms`]'s clock.
@@ -21,7 +21,10 @@ pub enum Event {
 /// Milliseconds on the monotonic clock, which the touch panel stamps its
 /// events with.
 pub fn monotonic_ms() -> u64 {
-    let mut ts = libc::timespec { tv_sec: 0, tv_nsec: 0 };
+    let mut ts = libc::timespec {
+        tv_sec: 0,
+        tv_nsec: 0,
+    };
     let rc = unsafe { libc::clock_gettime(libc::CLOCK_MONOTONIC, &mut ts) };
     assert_eq!(rc, 0, "read the monotonic clock");
     ts.tv_sec as u64 * 1000 + ts.tv_nsec as u64 / 1_000_000
@@ -35,7 +38,12 @@ fn set_nonblocking(fd: RawFd) -> io::Result<()> {
     Ok(())
 }
 
-const KEYS: [KeyCode; 4] = [KeyCode::KEY_POWER, KeyCode::KEY_VOLUMEUP, KeyCode::KEY_VOLUMEDOWN, KeyCode::KEY_BACK];
+const KEYS: [KeyCode; 4] = [
+    KeyCode::KEY_POWER,
+    KeyCode::KEY_VOLUMEUP,
+    KeyCode::KEY_VOLUMEDOWN,
+    KeyCode::KEY_BACK,
+];
 
 fn key_of(code: KeyCode) -> Option<Key> {
     match code {
@@ -91,8 +99,12 @@ impl Panel {
         let mut slots = 1;
         for (axis, info) in dev.get_absinfo().context("read touch axis ranges")? {
             match axis {
-                AbsoluteAxisCode::ABS_MT_POSITION_X => x_range = Some((info.minimum(), info.maximum())),
-                AbsoluteAxisCode::ABS_MT_POSITION_Y => y_range = Some((info.minimum(), info.maximum())),
+                AbsoluteAxisCode::ABS_MT_POSITION_X => {
+                    x_range = Some((info.minimum(), info.maximum()))
+                }
+                AbsoluteAxisCode::ABS_MT_POSITION_Y => {
+                    y_range = Some((info.minimum(), info.maximum()))
+                }
                 AbsoluteAxisCode::ABS_MT_SLOT => slots = info.maximum() as usize + 1,
                 _ => {}
             }
@@ -105,16 +117,34 @@ impl Panel {
         let request = (1u32 << 30) | (4u32 << 16) | (u32::from(b'E') << 8) | 0xa0;
         let clock: libc::c_int = libc::CLOCK_MONOTONIC;
         if unsafe { libc::ioctl(dev.as_raw_fd(), request as _, &clock) } < 0 {
-            return Err(io::Error::last_os_error()).context("stamp touch events with the monotonic clock");
+            return Err(io::Error::last_os_error())
+                .context("stamp touch events with the monotonic clock");
         }
         set_nonblocking(dev.as_raw_fd()).context("make touch non-blocking")?;
-        let mut panel =
-            Panel { dev, path, x_range, y_range, slots, slot: 0, down: false, was_down: false, raw: (0, 0), moved: false, dropped: false };
+        let mut panel = Panel {
+            dev,
+            path,
+            x_range,
+            y_range,
+            slots,
+            slot: 0,
+            down: false,
+            was_down: false,
+            raw: (0, 0),
+            moved: false,
+            dropped: false,
+        };
         // The kernel drops a position equal to the one a slot already holds,
         // so a touch landing where the last one lifted carries no position;
         // start from what the panel holds now.
         panel.resync().context("read the touch state")?;
-        eprintln!("touch {:?}: x {:?} y {:?}, {slots} slots, slot 0 at {:?}", panel.dev.name().unwrap_or("?"), x_range, y_range, panel.raw);
+        eprintln!(
+            "touch {:?}: x {:?} y {:?}, {slots} slots, slot 0 at {:?}",
+            panel.dev.name().unwrap_or("?"),
+            x_range,
+            y_range,
+            panel.raw
+        );
         Ok(panel)
     }
 
@@ -139,7 +169,9 @@ impl Panel {
         for e in events {
             match e.destructure() {
                 // Skip to the next report and read the state back there.
-                EventSummary::Synchronization(_, SynchronizationCode::SYN_DROPPED, _) => self.dropped = true,
+                EventSummary::Synchronization(_, SynchronizationCode::SYN_DROPPED, _) => {
+                    self.dropped = true
+                }
                 EventSummary::Synchronization(_, SynchronizationCode::SYN_REPORT, _) => {
                     if std::mem::take(&mut self.dropped) {
                         self.resync()?;
@@ -160,15 +192,25 @@ impl Panel {
                 }
                 // A Xiaomi controller in its low-power gesture mode tells of
                 // a double tap on the dark panel as a wake-up key.
-                EventSummary::Key(_, KeyCode::KEY_WAKEUP, v) if v <= 1 => out.push(Event::Key(Key::Power, v == 1)),
+                EventSummary::Key(_, KeyCode::KEY_WAKEUP, v) if v <= 1 => {
+                    out.push(Event::Key(Key::Power, v == 1))
+                }
                 _ if self.dropped => {}
                 EventSummary::AbsoluteAxis(_, AbsoluteAxisCode::ABS_MT_SLOT, v) => self.slot = v,
-                EventSummary::AbsoluteAxis(_, AbsoluteAxisCode::ABS_MT_TRACKING_ID, v) if self.slot == 0 => self.down = v >= 0,
-                EventSummary::AbsoluteAxis(_, AbsoluteAxisCode::ABS_MT_POSITION_X, v) if self.slot == 0 => {
+                EventSummary::AbsoluteAxis(_, AbsoluteAxisCode::ABS_MT_TRACKING_ID, v)
+                    if self.slot == 0 =>
+                {
+                    self.down = v >= 0
+                }
+                EventSummary::AbsoluteAxis(_, AbsoluteAxisCode::ABS_MT_POSITION_X, v)
+                    if self.slot == 0 =>
+                {
                     self.raw.0 = v;
                     self.moved = true;
                 }
-                EventSummary::AbsoluteAxis(_, AbsoluteAxisCode::ABS_MT_POSITION_Y, v) if self.slot == 0 => {
+                EventSummary::AbsoluteAxis(_, AbsoluteAxisCode::ABS_MT_POSITION_Y, v)
+                    if self.slot == 0 =>
+                {
                     self.raw.1 = v;
                     self.moved = true;
                 }
@@ -198,16 +240,29 @@ struct XiaomiTouchRequest {
 /// low-power gesture mode while the panel is off, and reports a double tap
 /// as KEY_WAKEUP.
 fn xiaomi_double_tap(on: bool) -> Result<()> {
-    let dev = fs::OpenOptions::new().read(true).write(true).open(XIAOMI_TOUCH).with_context(|| format!("open {XIAOMI_TOUCH}"))?;
+    let dev = fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .open(XIAOMI_TOUCH)
+        .with_context(|| format!("open {XIAOMI_TOUCH}"))?;
     // _IO('T', 3): choose which touchscreen this client speaks for.
     let select = (u32::from(b'T') << 8) | 3;
     if unsafe { libc::ioctl(dev.as_raw_fd(), select as _, 0usize) } < 0 {
         return Err(io::Error::last_os_error()).context("select touch 0");
     }
-    let mut req = XiaomiTouchRequest { touch_id: 0, cmd: 0, mode: 14, len: 1, pad: 0, data: [0; 256] };
+    let mut req = XiaomiTouchRequest {
+        touch_id: 0,
+        cmd: 0,
+        mode: 14,
+        len: 1,
+        pad: 0,
+        data: [0; 256],
+    };
     req.data[0] = i32::from(on);
     // _IOW('T', 0, struct): set a mode's current value.
-    let set = (1u32 << 30) | ((std::mem::size_of::<XiaomiTouchRequest>() as u32) << 16) | (u32::from(b'T') << 8);
+    let set = (1u32 << 30)
+        | ((std::mem::size_of::<XiaomiTouchRequest>() as u32) << 16)
+        | (u32::from(b'T') << 8);
     if unsafe { libc::ioctl(dev.as_raw_fd(), set as _, &mut req) } < 0 {
         return Err(io::Error::last_os_error()).context("set Touch_Doubletap_Mode");
     }
@@ -244,7 +299,9 @@ impl Inputs {
         let dir = CString::new("/dev/input")?;
         // IN_ATTRIB too: ueventd sets a node's owner and mode right after
         // creating it, and the node may only open once that is done.
-        if unsafe { libc::inotify_add_watch(fd, dir.as_ptr(), libc::IN_CREATE | libc::IN_ATTRIB) } < 0 {
+        if unsafe { libc::inotify_add_watch(fd, dir.as_ptr(), libc::IN_CREATE | libc::IN_ATTRIB) }
+            < 0
+        {
             return Err(io::Error::last_os_error()).context("watch /dev/input");
         }
         let wakeful = Wakeful::new()?;
@@ -277,21 +334,34 @@ impl Inputs {
                 continue;
             }
             let direct = dev.properties().contains(PropType::DIRECT);
-            let mt = dev
-                .supported_absolute_axes()
-                .is_some_and(|a| a.contains(AbsoluteAxisCode::ABS_MT_POSITION_X) && a.contains(AbsoluteAxisCode::ABS_MT_POSITION_Y));
-            let keys = dev.supported_keys().is_some_and(|k| KEYS.iter().any(|c| k.contains(*c)));
-            eprintln!("input {}: {:?} direct={direct} multitouch={mt} keys={keys}", path.display(), dev.name().unwrap_or("?"));
+            let mt = dev.supported_absolute_axes().is_some_and(|a| {
+                a.contains(AbsoluteAxisCode::ABS_MT_POSITION_X)
+                    && a.contains(AbsoluteAxisCode::ABS_MT_POSITION_Y)
+            });
+            let keys = dev
+                .supported_keys()
+                .is_some_and(|k| KEYS.iter().any(|c| k.contains(*c)));
+            eprintln!(
+                "input {}: {:?} direct={direct} multitouch={mt} keys={keys}",
+                path.display(),
+                dev.name().unwrap_or("?")
+            );
             if direct && mt && self.panel.is_none() {
                 self.wakeful.add(dev.as_raw_fd())?;
                 self.panel = Some(Panel::new(path, dev)?);
                 for w in &self.touch_writes {
-                    fs::write(&w.path, &w.value).with_context(|| format!("write {} to {}", w.value, w.path))?;
-                    skyward_sys::kmsg(&format!("wrote {} to {} for the touchscreen", w.value, w.path))?;
+                    fs::write(&w.path, &w.value)
+                        .with_context(|| format!("write {} to {}", w.value, w.path))?;
+                    skyward_sys::kmsg(&format!(
+                        "wrote {} to {} for the touchscreen",
+                        w.value, w.path
+                    ))?;
                 }
                 if self.double_tap && std::path::Path::new(XIAOMI_TOUCH).exists() {
                     let said = match xiaomi_double_tap(true) {
-                        Ok(()) => "double tap to wake turned on in the Xiaomi touch driver".to_string(),
+                        Ok(()) => {
+                            "double tap to wake turned on in the Xiaomi touch driver".to_string()
+                        }
                         Err(e) => format!("double tap to wake not turned on: {e:#}"),
                     };
                     skyward_sys::kmsg(&said)?;
@@ -310,7 +380,8 @@ impl Inputs {
         let mut buf = [0u8; 4096];
         let mut any = false;
         loop {
-            let n = unsafe { libc::read(self.watch.as_raw_fd(), buf.as_mut_ptr().cast(), buf.len()) };
+            let n =
+                unsafe { libc::read(self.watch.as_raw_fd(), buf.as_mut_ptr().cast(), buf.len()) };
             if n >= 0 {
                 any = true;
                 continue;
@@ -327,6 +398,18 @@ impl Inputs {
     /// Whether a touch panel has come up.
     pub fn has_panel(&self) -> bool {
         self.panel.is_some()
+    }
+
+    /// Where the touch panel's input node is under /sys, which is what says
+    /// whether it may wake the phone from a suspend.
+    ///
+    /// The node is `/dev/input/eventN`, and the class folder of the same name
+    /// holds the `device` link to the driver's own device, whose
+    /// `power/wakeup` is the switch. `None` until a panel has come up.
+    pub fn panel_node(&self) -> Option<PathBuf> {
+        let panel = self.panel.as_ref()?;
+        let name = panel.path.file_name()?.to_str()?;
+        Some(Path::new("/sys/class/input").join(name))
     }
 
     /// Readable while a device has something queued, or /dev/input changed.
@@ -358,10 +441,10 @@ impl Inputs {
                     // The kernel's own repeats of a key held are left out;
                     // the UI times its own.
                     for e in events {
-                        if let EventSummary::Key(_, code, value @ (0 | 1)) = e.destructure() {
-                            if let Some(k) = key_of(code) {
-                                out.push(Event::Key(k, value == 1));
-                            }
+                        if let EventSummary::Key(_, code, value @ (0 | 1)) = e.destructure()
+                            && let Some(k) = key_of(code)
+                        {
+                            out.push(Event::Key(k, value == 1));
                         }
                     }
                 }

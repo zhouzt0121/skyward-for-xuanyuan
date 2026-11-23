@@ -128,13 +128,17 @@ pub struct KeyMint<'a> {
 impl<'a> KeyMint<'a> {
     /// Reach the running key service, or say that none is.
     pub fn open(binder: &'a Binder) -> Result<KeyMint<'a>> {
-        let device = service::find(binder, SERVICE)?
-            .with_context(|| format!("{SERVICE} is not running; the phone's key service has to be started first"))?;
+        let device = service::find(binder, SERVICE)?.with_context(|| {
+            format!("{SERVICE} is not running; the phone's key service has to be started first")
+        })?;
         Ok(KeyMint { device })
     }
 
     pub fn hardware(&self) -> Result<Hardware> {
-        let reply = self.device.transact(GET_HARDWARE_INFO, &Parcel::call(DEVICE)).context("ask the key service about itself")?;
+        let reply = self
+            .device
+            .transact(GET_HARDWARE_INFO, &Parcel::call(DEVICE))
+            .context("ask the key service about itself")?;
         let mut read = reply.read();
         status::ok(&mut read).context("ask the key service about itself")?;
         let end = read.structure()?;
@@ -159,7 +163,9 @@ impl<'a> KeyMint<'a> {
                 // firmware running now, as Android's keystore2 renews one
                 // for vold, and the one on disk is left as it is. A storage
                 // key is bound to nothing that has to be given again.
-                let renewed = self.upgrade(key, |call| call.i32(0)).context("renew the storage key for the firmware running now")?;
+                let renewed = self
+                    .upgrade(key, |call| call.i32(0))
+                    .context("renew the storage key for the firmware running now")?;
                 self.convert(&renewed)
             }
             converted => converted,
@@ -169,7 +175,10 @@ impl<'a> KeyMint<'a> {
     fn convert(&self, key: &[u8]) -> Result<Vec<u8>> {
         let mut call = Parcel::call(DEVICE);
         call.blob(key);
-        let reply = self.device.transact(CONVERT_STORAGE_KEY, &call).context("make a storage key for this start")?;
+        let reply = self
+            .device
+            .transact(CONVERT_STORAGE_KEY, &call)
+            .context("make a storage key for this start")?;
         let mut read = reply.read();
         status::ok(&mut read).context("make a storage key for this start")?;
         read.blob().context("read the storage key")
@@ -182,13 +191,17 @@ impl<'a> KeyMint<'a> {
         call.blob(key_blob);
         call.blob(app_id);
         call.blob(&[]);
-        let reply = self.device.transact(GET_KEY_CHARACTERISTICS, &call).context("ask what the key may be used for")?;
+        let reply = self
+            .device
+            .transact(GET_KEY_CHARACTERISTICS, &call)
+            .context("ask what the key may be used for")?;
         let mut read = reply.read();
         status::ok(&mut read).context("ask what the key may be used for")?;
         let mut out = Vec::new();
         for _ in 0..read.i32()?.max(0) {
             let end = read.structure()?;
-            read.i32().context("read which part of the phone holds the key")?;
+            read.i32()
+                .context("read which part of the phone holds the key")?;
             for _ in 0..read.i32()?.max(0) {
                 let next = read.structure()?;
                 let tag = read.i32()?;
@@ -212,24 +225,96 @@ impl<'a> KeyMint<'a> {
     /// key was made for, so a wrong secret fails here rather than yielding
     /// something that looks like a key. A key guarded by a screen lock
     /// takes the note the secure world wrote when it was answered.
-    pub fn gcm_decrypt(&self, key_blob: &[u8], app_id: &[u8], nonce: &[u8], body: &[u8], note: Option<&Token>) -> Result<Vec<u8>> {
+    pub fn gcm_decrypt(
+        &self,
+        key_blob: &[u8],
+        app_id: &[u8],
+        nonce: &[u8],
+        body: &[u8],
+        note: Option<&Token>,
+    ) -> Result<Vec<u8>> {
         let operation = match self.begin(key_blob, app_id, nonce, note) {
             Ok(operation) => operation,
             Err(e) if status::refused_with(&e) == Some(KEY_REQUIRES_UPGRADE) => {
-                // The phone's firmware has moved on since this key was
-                // made. Renewing it gives a key for the firmware running
-                // now; the one on disk is left as it is, so nothing of the
-                // phone's own is changed by reading it here.
-                let renewed = self
-                    .upgrade(key_blob, |call| Self::gcm_params(call, app_id, nonce))
-                    .context("renew the key for the firmware running now")?;
-                self.begin(&renewed, app_id, nonce, note)?
+                // The secure world says the key was made under an older build
+                // and wants it renewed before it is used again. Android's own
+                // key store renews such a key as it unlocks it, and this
+                // service does renew keys — the storage key is renewed the
+                // same way — so asking it to renew this one is the first
+                // thing to try. The renewed blob is only kept in hand: the
+                // phone's own copy is left as it was, so nothing the
+                // installed system reads is changed by a recovery doing this.
+                skyward_sys::kmsg(&format!(
+                    "the key service says a key needs an upgrade ({}); asking it to renew the key in hand",
+                    e
+                ))?;
+                match self.upgrade(key_blob, |call| Self::binding(call, app_id)) {
+                    Ok(renewed) => match self.begin(&renewed, app_id, nonce, note) {
+                        Ok(operation) => operation,
+                        Err(again) => {
+                            let _ = skyward_sys::kmsg(&format!(
+                                "the renewed key did not open either: {again:#}; its environment was {}",
+                                crate::environment::said()
+                            ));
+                            return Err(again);
+                        }
+                    },
+                    Err(why) => {
+                        // Renewing was refused. Tell the service the installed
+                        // system's build instead and open the same key with it
+                        // once more, which is what a recovery of this
+                        // generation does. A key that was renewed would no
+                        // longer open in the system this recovery serves, so
+                        // nothing is written back.
+                        skyward_sys::kmsg(&format!(
+                            "the key service would not renew the key ({why:#}); its environment was {}",
+                            crate::environment::said()
+                        ))?;
+                        let reason = match crate::environment::pin() {
+                            Ok(()) => "the key service was started again".to_string(),
+                            Err(e) => format!("the key service could not be started again: {e:#}"),
+                        };
+                        let binder = Binder::open()
+                            .context("open the key driver after the key service restarted")?;
+                        let fresh = KeyMint::open(&binder)
+                            .context("reach the key service after it restarted")?;
+                        let again = match fresh.begin(key_blob, app_id, nonce, note) {
+                            Ok(op) => {
+                                let mut out = fresh.update(&op, body)?;
+                                out.extend_from_slice(&fresh.finish(&op)?);
+                                return Ok(out);
+                            }
+                            Err(again) => again,
+                        };
+                        anyhow::ensure!(
+                            status::refused_with(&again) != Some(KEY_REQUIRES_UPGRADE),
+                            "the key service still says the key needs an upgrade after it was started again: {again:#}; \
+                             its hardware is {}, its environment was {}, and restarting it said {}",
+                            crate::environment::hardware(),
+                            crate::environment::said(),
+                            reason
+                        );
+                        return Err(again);
+                    }
+                }
             }
             Err(e) => return Err(e),
         };
         let mut out = self.update(&operation, body)?;
         out.extend_from_slice(&self.finish(&operation)?);
         Ok(out)
+    }
+
+    /// What a key is bound to, and nothing else, as renewing it takes: the
+    /// service answers a renewal handed the way the key is used (its block
+    /// mode, padding, nonce or purpose) with an invalid argument.
+    fn binding(call: &mut Parcel, app_id: &[u8]) {
+        if app_id.is_empty() {
+            call.i32(0);
+        } else {
+            call.i32(1);
+            parameter(call, TAG_APPLICATION_ID, Value::Blob(app_id));
+        }
     }
 
     /// What the key service has to be told to use an AES-GCM key: how it is
@@ -243,18 +328,36 @@ impl<'a> KeyMint<'a> {
     /// key that was made bound to nothing.
     fn gcm_params(call: &mut Parcel, app_id: &[u8], nonce: &[u8]) {
         call.i32(if app_id.is_empty() { 5 } else { 6 });
-        parameter(call, TAG_BLOCK_MODE, Value::Enum(VALUE_BLOCK_MODE, BLOCK_MODE_GCM));
-        parameter(call, TAG_PADDING, Value::Enum(VALUE_PADDING_MODE, PADDING_NONE));
+        parameter(
+            call,
+            TAG_BLOCK_MODE,
+            Value::Enum(VALUE_BLOCK_MODE, BLOCK_MODE_GCM),
+        );
+        parameter(
+            call,
+            TAG_PADDING,
+            Value::Enum(VALUE_PADDING_MODE, PADDING_NONE),
+        );
         parameter(call, TAG_MAC_LENGTH, Value::Integer(128));
         if !app_id.is_empty() {
             parameter(call, TAG_APPLICATION_ID, Value::Blob(app_id));
         }
         parameter(call, TAG_NONCE, Value::Blob(nonce));
-        parameter(call, TAG_PURPOSE, Value::Enum(VALUE_KEY_PURPOSE, PURPOSE_DECRYPT));
+        parameter(
+            call,
+            TAG_PURPOSE,
+            Value::Enum(VALUE_KEY_PURPOSE, PURPOSE_DECRYPT),
+        );
     }
 
     /// Open a decryption with the key service and keep hold of it.
-    fn begin(&self, key_blob: &[u8], app_id: &[u8], nonce: &[u8], note: Option<&Token>) -> Result<Handle<'a>> {
+    fn begin(
+        &self,
+        key_blob: &[u8],
+        app_id: &[u8],
+        nonce: &[u8],
+        note: Option<&Token>,
+    ) -> Result<Handle<'a>> {
         let mut call = Parcel::call(DEVICE);
         call.i32(PURPOSE_DECRYPT);
         call.blob(key_blob);
@@ -269,17 +372,28 @@ impl<'a> KeyMint<'a> {
 
         // The decryption the service opens outlives the reply that named
         // it, so take a share of it before the reply's room goes back.
-        let reply = self.device.transact(BEGIN, &call).context("start a decryption")?;
+        let reply = self
+            .device
+            .transact(BEGIN, &call)
+            .context("start a decryption")?;
         let mut read = reply.read();
         status::ok(&mut read).context("start a decryption")?;
-        read.structure().context("read what the key service answered")?;
+        read.structure()
+            .context("read what the key service answered")?;
         read.i64().context("read the decryption's challenge")?;
-        let params = read.i32().context("read how many parameters the decryption came back with")?;
+        let params = read
+            .i32()
+            .context("read how many parameters the decryption came back with")?;
         for _ in 0..params.max(0) {
-            let end = read.structure().context("read a parameter the decryption came back with")?;
+            let end = read
+                .structure()
+                .context("read a parameter the decryption came back with")?;
             read.go(end)?;
         }
-        match read.object().context("read the decryption the key service opened")? {
+        match read
+            .object()
+            .context("read the decryption the key service opened")?
+        {
             Some(h) => Handle::hold(reply.binder(), h),
             None => anyhow::bail!("the key service opened no decryption"),
         }
@@ -292,7 +406,10 @@ impl<'a> KeyMint<'a> {
         let mut call = Parcel::call(DEVICE);
         call.blob(key_blob);
         params(&mut call);
-        let reply = self.device.transact(UPGRADE_KEY, &call).context("renew the key")?;
+        let reply = self
+            .device
+            .transact(UPGRADE_KEY, &call)
+            .context("renew the key")?;
         let mut read = reply.read();
         status::ok(&mut read).context("renew the key")?;
         read.blob().context("read the renewed key")
@@ -303,7 +420,9 @@ impl<'a> KeyMint<'a> {
         call.blob(input);
         call.none();
         call.none();
-        let reply = operation.transact(UPDATE, &call).context("feed the decryption")?;
+        let reply = operation
+            .transact(UPDATE, &call)
+            .context("feed the decryption")?;
         let mut read = reply.read();
         status::ok(&mut read).context("feed the decryption")?;
         read.blob().context("read what the decryption gave back")
@@ -316,14 +435,19 @@ impl<'a> KeyMint<'a> {
         call.none();
         call.none();
         call.opt_blob(None);
-        let reply = operation.transact(FINISH, &call).context("close the decryption")?;
+        let reply = operation
+            .transact(FINISH, &call)
+            .context("close the decryption")?;
         let mut read = reply.read();
-        status::ok(&mut read).context("close the decryption, which is where a wrong key is refused")?;
+        status::ok(&mut read)
+            .context("close the decryption, which is where a wrong key is refused")?;
         read.blob().context("read what the decryption ended with")
     }
 
     fn abort(&self, operation: &Handle) -> Result<()> {
-        let reply = operation.transact(ABORT, &Parcel::call(OPERATION)).context("drop the decryption")?;
+        let reply = operation
+            .transact(ABORT, &Parcel::call(OPERATION))
+            .context("drop the decryption")?;
         status::ok(&mut reply.read()).context("drop the decryption")
     }
 

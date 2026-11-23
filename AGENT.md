@@ -350,6 +350,32 @@ recovery's init runs: `ssgtzd` and the OMAPI service, both below.
   credential` (the credential), or `the secure element is holding off further
   tries` (the element's own throttling, after repeated wrong tries).
 
+### The screen lock the phone has now, not the one before it
+
+`locksettings.db` records which of a user's protector blobs the current
+credential opens (`sp-handle`), and Android writes it in SQLite's
+**write-ahead log** mode. A screen lock set or changed while the phone was
+running can therefore still be in `locksettings.db-wal` and not yet in
+`locksettings.db`: the log is folded in at a checkpoint or a clean shutdown,
+not when a value changes.
+
+Reading the file where it lies with `?immutable=1` — which is what Skyward did
+— tells SQLite the file never changes, so it reads the main file and **never
+replays the log**. The recovery then opened the *previous* protector and checked
+the credential against the *previous* `.pwd`: the old password worked, the new
+one did not, and the fault looked like a credential problem rather than a read
+problem. `locksettings.rs` now copies the database and its `-wal`/`-shm` into a
+scratch folder, opens the copy read-write once so that SQLite folds the log in,
+closes it, and reads the copy. That works for a phone switched off without a
+clean shutdown (no `-shm`, or a half-written log) as well as for one that was
+not. Nothing under `/data` is written to, and the copy goes with the read.
+
+The tests build exactly that shape: a WAL-mode database whose newest value lives
+only in the log, copied out while the writing connection is still open — SQLite
+deletes a log when the last connection closes, and a phone that loses power
+closes nothing. `target/wal-fix-test.py` reproduces the whole thing outside Rust
+and is the quickest way to see the before and after.
+
 ## Lighting the dark panel
 
 Only the power key lit it until 0.2.1. On the phone's own system the same panel
@@ -362,12 +388,106 @@ screen pixels, so the slop is multiplied by the width**; comparing it against
 `0.08` directly makes a double tap impossible, which is how it was first
 written.
 
-**A suspended phone cannot report a tap**, so a phone that names
-`double_tap = true` in `[touch]` keeps the phone awake while the panel is off —
-`may_sleep` in `skyward/src/ui.rs` is false for it. That is the price: the panel
-lights without the power key, and the phone does not sleep. Only `haotian` names
-it; a phone whose controller stops reporting fingers with its panel off has
-nothing for the feature to work with.
+**A suspended phone cannot report a tap**, so the two-tap wake is a switch on
+the settings page rather than something a phone does because its panel could.
+`[touch] double_tap` in the device's toml says only that the panel **can**: the
+gesture ships **off**, because it costs the phone its suspend (see below), and
+least power is what a recovery should do unless someone asks for more.
+`skyward/src/ui.rs` reads the switch from the settings file
+(`State::double_tap`, kept in `/metadata/skyward/settings.json`) and offers the
+row only where the panel has a doze of its own to keep dark.
+
+Where a driver does expose a wakeup source, `skyward/src/ui.rs` arms the panel's
+input node (`skyward_sys::sleep::arm_wakeup`, which writes `enabled` to the
+device's `power/wakeup`) the first time the panel goes dark, and then the panel
+is taken down and the phone sleeps as usual. **This panel has no such source**,
+so there the panel is kept dozing instead. Either way the decision is
+`Idle::may_sleep` in `skyward-ui/src/surface.rs`, a function with no state, so it
+is tested on a computer rather than on the phone.
+
+A phone that went dark keeps awake for `DARK_GRACE` (30 s) before it is let
+sleep, so a tap just after the panel goes dark still lands. Only `haotian` names
+`double_tap`; a phone whose controller stops reporting fingers with its panel off
+has nothing for the feature to work with.
+
+### The touchscreen dies with the panel, and that is the whole story
+
+Measured on `haotian` (0.2.3, the panel dark). **Xiaomi's touch driver follows
+the display's blanking notices and suspends the touch IC on them:**
+
+```
+[MI_TP_I][xiaomi_drm_panel_notifier_callback:827]: FB_BLANK POWER DOWN
+[MI_TP_I][xiaomi_touch_suspend_work:673]: touch id 0 enter
+```
+
+From that moment `getevent` on `/dev/input/event7` (`Xiaomi_Touch_Input_0`)
+reports **nothing at all** — not a finger, not a `BTN_TOUCH`, not a report —
+while the panel is dark, and it starts again only when the panel is brought
+back. So a tap cannot be felt on a panel that was turned off, and no userspace
+switch changes that:
+
+- The input device is `/sys/devices/virtual/input/input7`, a *virtual* node made
+  by Xiaomi's touch layer; the hardware is `spi2.0` on `synaptics_tcm_spi`, and
+  **neither has a `power/wakeup`** — that is why `arm_wakeup` returns `false` on
+  this phone. Real wakeup sources exist only for the PMIC keys and the GPIO keys.
+- `/sys/kernel/debug/tp_debug/switch_state` takes `irq-enable`/`irq-disable`,
+  `tp-suspend-off` and `tp-sd-off`, and writing them all succeeds (exit 0) — and
+  the IC still reports nothing, because the driver re-suspends it on the next
+  panel notifier and the panel is what the IC is wired to.
+- `/sys/class/touch/touch_dev` has no `gesture_enable`. The sensorhub gesture
+  path the driver logs (`xiaomi_get_gesture_type`, `notify_sensorhub_enable`) is
+  the *system's* double-tap-to-wake, and its switch is not exposed to a recovery.
+
+**This is why the double tap worked while the always-on display was on and
+stopped working when it was turned off.** The AOD path puts the panel into its
+own doze with a DCS command set: the CRTC keeps running, the backlight is 0, and
+**no `FB_BLANK` is ever sent** — so the touch IC is never suspended and the taps
+arrive. Turning the AOD off sent the panel through `rest()`/`turn_off()`, which
+does blank, and took the touchscreen with it.
+
+So a phone that has to feel a tap keeps its panel **dozing dark** rather than
+taking it down: `keeps_touch` in `skyward/src/ui.rs` sends the same doze command
+set the AOD uses with the frame blacked out, and the panel is left alone
+there. The panel is therefore never `Off` on such a phone, so the phone does not
+suspend either — `may_sleep` is false while the panel dozes. **That is the honest
+price of a double tap on this panel: either the panel dozes (touch works, some
+power) or it is off (no touch, least power).** Where a phone's driver does expose
+a wakeup source, `arm_wakeup` succeeds and the panel is taken down instead.
+
+Two things learned while measuring, which are their own kinds of trap:
+
+- **A recovery that exits leaves `recovery` stuck in `D` state inside
+  `msm_release` → `dsi_display_find_mode`**, so `ps` shows it alive when it is
+  gone. Do not read a `recovery` row in `ps` as "the recovery is running".
+- The `dmesg` clock is uptime, and the notifier lines are the only record of
+  what the panel was told. `FB_BLANK UNBLANK`, `FB_BLANK POWER DOWN` and
+  `FB_BLANK LP` are the three that matter.
+
+## Power
+
+Three things drew more than a recovery needs, all found from "功耗有点高":
+
+- **The phone never suspended.** `may_sleep` carried a `!cfg.touch.double_tap`
+  term, so `haotian` stayed awake for ever with the panel off. It now sleeps,
+  with the touchscreen armed to wake it (see above).
+- **The panel was switched to 120 Hz** on every start. A recovery's pages are
+  mostly still, and the switch is a modeset the display controller pays for, so
+  it is now `[display] fastest_refresh`, off unless a phone names it. The mode
+  the panel comes up in, DSC and the sub-pixel block are untouched: they are the
+  colour fix and are load-bearing.
+- **The idle loop woke every second** and the battery thread read its driver
+  every second, with the panel dark. The loop now waits `DARK_WAIT` (5 s) when
+  the panel is off and nothing is due — every fd is still polled, so a key, a
+  cable or a tap wakes it at once — and the battery is read every 10 s while the
+  panel is dark, at once through `Readings::ask` when a uevent says to.
+
+`skyward/src/art.rs` clears what ART compiled ahead of time, once per image, on
+the first start after a flash: the phone otherwise runs on code compiled for the
+system it no longer has, re-verifying and recompiling as it goes, which is slower
+and hotter. It records on `persist` (`skyward/art-cleared`, a few bytes) which
+image did it, so it runs once and not at every start, and it never fails the
+recovery — a phone whose data partition will not open is left as it was and
+tried again next time.
 
 ## USB and adb
 
@@ -414,13 +534,25 @@ CI (`.github/workflows/build-haotian.yml`) builds the image **and** runs
 Clippy is `-D warnings`, so an unused import or a needless borrow fails the
 build; `cargo fmt` habits matter.
 
-A release is a tag: `git push ssh://git@github.com/Rinrroy/skyward-for-haotian.git main v0.2.2`
+A release is a tag: `git push ssh://git@github.com/Rinrroy/skyward-for-haotian.git main v0.3.1.2`
 builds the same image and publishes it, with `SHA256SUMS` beside it, as a GitHub
 release named for the tag — the artifact a branch run leaves expires after
 thirty days, a release does not. Bump `[workspace.package] version` in
 `Cargo.toml` first (and let `cargo metadata` rewrite `Cargo.lock`), and put the
 release's own notes in `docs/releases/<tag>.md`; the workflow uses that file
 when it exists and the commits since the last release when it does not.
+
+The fork's versions have **four** parts from 0.3.1.2 on: the three numbers
+Cargo takes — the upstream version the build is made on, which is what
+`[workspace.package] version` holds — and the fork's own patch level after them,
+which Cargo has no room for. The patch level is written in
+`skyward_info::VERSION` (`crates/skyward-info/src/lib.rs`), which is what the
+About page, the boot log and the update check say; it is bumped together with
+the Cargo version, and a test in that file fails if the two drift apart. The
+update check reads four-part tags too (`skyward-net/src/github.rs`), and
+compares a build only with releases named the same way, so the older three-part
+releases are never offered as an update to it — which is why `semver` is no
+longer a dependency.
 
 ## Reading this repo's history
 

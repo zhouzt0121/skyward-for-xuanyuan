@@ -491,9 +491,25 @@ fn install<S>(ctx: &mut Context, mount: &Mount<S>, size: u64) -> Result<Done> {
     }?;
     let worked = matches!(done, Done::Decided(Outcome::Flashed { .. } | Outcome::Installed { .. }) | Done::Script { code: 0, .. });
     if worked && ctx.options.disable_avb {
-        for (name, result) in crate::avb::disable(Path::new(skyward_block::BY_NAME)) {
+        let results = crate::avb::disable(Path::new(skyward_block::BY_NAME));
+        let mut changed = Vec::new();
+        let mut failed = Vec::new();
+        for (name, result) in results {
+            match &result {
+                Ok(crate::avb::Done::Set) => changed.push(name.clone()),
+                Ok(crate::avb::Done::Already) => {}
+                Err(e) => failed.push(format!("{name}: {e:#}")),
+            }
             let _ = kmsg(&format!("install: disable AVB2.0 on {name}: {result:?}"));
         }
+        ctx.send(Event::Avb(crate::Avb {
+            slot: None,
+            done: match failed.is_empty() {
+                true if changed.is_empty() => Ok(None),
+                true => Ok(Some(changed.join(", "))),
+                false => Err(failed.join("; ")),
+            },
+        }));
     }
     Ok(done)
 }
@@ -783,10 +799,18 @@ fn apply<S>(ctx: &Context, mount: &Mount<S>, update: &Update) -> Result<i32> {
     let mut stage = Stage::Writing { done: 0, total };
     ctx.send(Event::Progress(stage.clone()));
     let mut told = Instant::now();
-    let (mut partitions, mut verifying, mut finishing, mut error) = (0, None, false, None);
+    let (mut partitions, mut verifying, mut finishing, mut error, mut progress) = (0, None, false, None, None);
     loop {
         match rx.recv_timeout(PROGRESS_EVERY) {
             Ok(Line::Status(Status::Step(step))) => finishing = step == 2,
+            Ok(Line::Status(Status::Progress(value))) | Ok(Line::Log(Log::Progress(value))) => {
+                // The engine's own count, never how far into the package
+                // something has read: the zip's directory is at its end and
+                // is read before any of it is applied.
+                if !finishing && verifying.is_none() {
+                    progress = Some(progress.unwrap_or(0).max(value));
+                }
+            }
             Ok(Line::Status(Status::Error(code))) => error = Some(code),
             Ok(Line::Log(Log::Partition(_))) => partitions += 1,
             Ok(Line::Log(Log::Overwriting)) => ctx.send(Event::Overwriting),
@@ -800,7 +824,7 @@ fn apply<S>(ctx: &Context, mount: &Mount<S>, update: &Update) -> Result<i32> {
         } else if let Some((index, partition)) = &verifying {
             Stage::Verifying { index: *index, count: partitions.max(index + 1), partition: partition.clone() }
         } else {
-            Stage::Writing { done: mount.served().saturating_sub(update.payload_offset).min(total), total }
+            Stage::Writing { done: total.saturating_mul(u64::from(progress.unwrap_or(0))) / 1000, total }
         };
         let moved_on = std::mem::discriminant(&now) != std::mem::discriminant(&stage);
         if now != stage && (moved_on || told.elapsed() >= PROGRESS_EVERY) {

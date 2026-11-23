@@ -2,7 +2,7 @@
 //! recovery: the libraries their partitions were built against, and a
 //! service directory that knows the phone describes them.
 
-use anyhow::{ensure, Context, Result};
+use anyhow::{Context, Result, ensure};
 use std::collections::BTreeSet;
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -10,7 +10,12 @@ use std::time::{Duration, Instant};
 
 /// Where a phone keeps the bundles of shared libraries its own partitions
 /// were built against.
-const BUNDLE_DIRS: [&str; 4] = ["/mnt/system_ext/apex", "/mnt/system/system/apex", "/mnt/product/apex", "/vendor/apex"];
+const BUNDLE_DIRS: [&str; 4] = [
+    "/mnt/system_ext/apex",
+    "/mnt/system/system/apex",
+    "/mnt/product/apex",
+    "/vendor/apex",
+];
 
 /// The file inside a bundle that holds its filesystem. It is stored whole,
 /// so the bundle can be opened where it lies.
@@ -25,16 +30,11 @@ const BUNDLE_LIBS: &str = "lib64";
 /// made for.
 const VENDOR_INTERFACE: &str = "ro.vndk.version";
 
-/// Where the phone describes the services its own partitions carry, and
-/// where a recovery looks for such descriptions.
-const DESCRIPTIONS: [&str; 2] = ["/vendor/etc/vintf/manifest", "/odm/etc/vintf/manifest"];
+/// Where a recovery looks for the descriptions of the services the running
+/// system carries, and the one the recovery writes there of the phone's
+/// own.
 const RECOVERY_DESCRIPTIONS: &str = "/system/etc/vintf/manifest";
-
-/// Where the phone keeps the descriptions that are not split into the folder
-/// above: one file per build of the platform's hardware stack, named after
-/// the platform, as sun and tuna are. The phone carries every platform's, and
-/// only the running one's describes hardware that is here.
-const PLATFORM_DESCRIPTIONS: [&str; 2] = ["/vendor/etc/vintf", "/odm/etc/vintf"];
+const PHONE_DESCRIPTION: &str = "phone.xml";
 
 /// The name init knows the service directory by, and the program it runs.
 const DIRECTORY_SERVICE: &str = "servicemanager";
@@ -109,7 +109,8 @@ pub fn prepare_hardware_directory(wanted: &[String]) -> Result<()> {
     if loader.exists() {
         fs::remove_file(loader).with_context(|| format!("take away {}", loader.display()))?;
     }
-    std::os::unix::fs::symlink(&from, loader).with_context(|| format!("point {} at {}", loader.display(), from.display()))?;
+    std::os::unix::fs::symlink(&from, loader)
+        .with_context(|| format!("point {} at {}", loader.display(), from.display()))?;
     let driver = Path::new(HARDWARE_DRIVER);
     if !driver.exists() {
         std::os::unix::fs::symlink(HARDWARE_DRIVER_NODE, driver)
@@ -127,12 +128,20 @@ pub fn prepare_hardware_directory(wanted: &[String]) -> Result<()> {
     // The directory reads both of these as the user its init script names,
     // and what the recovery makes under its own umask is root's alone: they
     // are given the modes the system's own copies have.
-    fs::set_permissions(RECOVERY_LABELS, std::os::unix::fs::PermissionsExt::from_mode(0o755))
-        .with_context(|| format!("open {RECOVERY_LABELS} to every user"))?;
-    fs::copy(from, &into).with_context(|| format!("copy {} to {}", from.display(), into.display()))?;
-    fs::write(RECOVERY_MANIFEST, describe_hardware(wanted)?).with_context(|| format!("write {RECOVERY_MANIFEST}"))?;
-    fs::set_permissions(RECOVERY_MANIFEST, std::os::unix::fs::PermissionsExt::from_mode(0o644))
-        .with_context(|| format!("let every user read {RECOVERY_MANIFEST}"))?;
+    fs::set_permissions(
+        RECOVERY_LABELS,
+        std::os::unix::fs::PermissionsExt::from_mode(0o755),
+    )
+    .with_context(|| format!("open {RECOVERY_LABELS} to every user"))?;
+    fs::copy(from, &into)
+        .with_context(|| format!("copy {} to {}", from.display(), into.display()))?;
+    fs::write(RECOVERY_MANIFEST, describe_hardware(wanted)?)
+        .with_context(|| format!("write {RECOVERY_MANIFEST}"))?;
+    fs::set_permissions(
+        RECOVERY_MANIFEST,
+        std::os::unix::fs::PermissionsExt::from_mode(0o644),
+    )
+    .with_context(|| format!("let every user read {RECOVERY_MANIFEST}"))?;
     // The directory turns itself off when it cannot find its own
     // description, and a run of it before this was written may have left
     // that behind.
@@ -160,13 +169,10 @@ fn describe_hardware(wanted: &[String]) -> Result<String> {
     Ok(out)
 }
 
-/// The libraries the phone's own hardware services need from the installed
-/// system, which a recovery's own /system/lib64 leaves out.
-///
-/// The phone's HALs are built against the system's bionic: libhardware.so in
-/// the vendor partition asks for libvndksupport.so, which asks for
-/// libdl_android.so, and both live on the system partition, not in the
-/// recovery's ramdisk. The system's own init mounts /system before any of
+/// The libraries the phone's own programs link against that only the system
+/// they run on carries: the vendor interface support a vendor program opens
+/// them through, and the bionic one the linker keeps its own state in. The
+/// bundle of the vendor interface is opened from the system too, before any of
 /// them starts, and a recovery does not. Without them every one of the
 /// phone's hardware services ends as soon as it starts, keymint's among
 /// them, and the data partition stays closed for want of it.
@@ -182,7 +188,10 @@ pub fn provide_system_libraries() -> Result<usize> {
     let into = Path::new(RECOVERY_LIBRARY_DIR);
     // The system is mounted at /mnt/system; its libraries are where its own
     // linker looks, and the bionic ones sit beside its bootstrap copy.
-    let dirs = [Path::new("/mnt/system/system/lib64"), Path::new("/mnt/system/system/lib64/bootstrap")];
+    let dirs = [
+        Path::new("/mnt/system/system/lib64"),
+        Path::new("/mnt/system/system/lib64/bootstrap"),
+    ];
     let mut copied = 0;
     for name in SYSTEM_LIBRARIES {
         let to = into.join(name);
@@ -191,12 +200,16 @@ pub fn provide_system_libraries() -> Result<usize> {
             // as the one on the system, which does not change under it.
             continue;
         }
-        let Some(from) = dirs.iter().map(|d| d.join(name)).find(|p| p.is_file()) else { continue };
+        let Some(from) = dirs.iter().map(|d| d.join(name)).find(|p| p.is_file()) else {
+            continue;
+        };
         // Copied beside where it goes and renamed into place, so a program
         // starting at the same moment never reads half a library.
         let mut part = to.clone().into_os_string();
         part.push(".part");
-        fs::copy(&from, &part).with_context(|| format!("copy {} to {}", from.display(), Path::new(&part).display()))?;
+        fs::copy(&from, &part).with_context(|| {
+            format!("copy {} to {}", from.display(), Path::new(&part).display())
+        })?;
         fs::rename(&part, &to).with_context(|| format!("put {} in place", to.display()))?;
         copied += 1;
     }
@@ -207,7 +220,9 @@ pub fn provide_system_libraries() -> Result<usize> {
 /// against and give the directory they are in. A phone whose partitions
 /// need no bundle has none to open.
 pub fn libraries() -> Result<Option<PathBuf>> {
-    let Some(version) = skyward_sys::prop(VENDOR_INTERFACE) else { return Ok(None) };
+    let Some(version) = skyward_sys::prop(VENDOR_INTERFACE) else {
+        return Ok(None);
+    };
     Ok(bundle(&format!("com.android.vndk.v{version}"))?.map(|at| at.join(BUNDLE_LIBS)))
 }
 
@@ -219,7 +234,11 @@ fn bundle(name: &str) -> Result<Option<PathBuf>> {
     if skyward_block::mount::is_mount_point(&at)? {
         return Ok(Some(at));
     }
-    let Some(file) = BUNDLE_DIRS.iter().map(|d| Path::new(d).join(format!("{name}.apex"))).find(|p| p.is_file()) else {
+    let Some(file) = BUNDLE_DIRS
+        .iter()
+        .map(|d| Path::new(d).join(format!("{name}.apex")))
+        .find(|p| p.is_file())
+    else {
         return Ok(None);
     };
     let (offset, length) = image(&file)?;
@@ -232,112 +251,122 @@ fn bundle(name: &str) -> Result<Option<PathBuf>> {
 /// Where the filesystem lies inside a bundle.
 fn image(file: &Path) -> Result<(u64, u64)> {
     let f = fs::File::open(file).with_context(|| format!("open {}", file.display()))?;
-    let mut bundle = zip::ZipArchive::new(f).with_context(|| format!("read what is in {}", file.display()))?;
-    let entry = bundle.by_name(BUNDLE_IMAGE).with_context(|| format!("{} holds no {BUNDLE_IMAGE}", file.display()))?;
+    let mut bundle =
+        zip::ZipArchive::new(f).with_context(|| format!("read what is in {}", file.display()))?;
+    let entry = bundle
+        .by_name(BUNDLE_IMAGE)
+        .with_context(|| format!("{} holds no {BUNDLE_IMAGE}", file.display()))?;
     if entry.compression() != zip::CompressionMethod::Stored {
-        anyhow::bail!("{} keeps its {BUNDLE_IMAGE} packed, which cannot be opened where it lies", file.display());
+        anyhow::bail!(
+            "{} keeps its {BUNDLE_IMAGE} packed, which cannot be opened where it lies",
+            file.display()
+        );
     }
-    let start = entry.data_start().with_context(|| format!("{BUNDLE_IMAGE} in {} says where it is not", file.display()))?;
+    let start = entry
+        .data_start()
+        .with_context(|| format!("{BUNDLE_IMAGE} in {} says where it is not", file.display()))?;
     Ok((start, entry.size()))
 }
 
-/// Give the phone's service directory the descriptions of the services in
-/// `wanted`, and the description files in `files`, which the phone keeps
-/// apart from the rest. The directory turns away a hardware service the
-/// running system does not describe, and a recovery starts up describing
-/// only the few services of its own. Only the descriptions that are needed
-/// are taken: the directory reads the whole of its description directory
-/// at once, and one file it cannot make sense of leaves it describing
-/// nothing.
-pub fn publish_descriptions(wanted: &[String], files: &[String]) -> Result<usize> {
+/// Tell the phone's service directory of the services in `wanted`, which
+/// the phone's own programs register and the recovery itself may serve.
+/// The directory turns away a hardware service the running system does
+/// not describe, and a recovery starts up describing only the few services
+/// of its own. The recovery writes one description of its own for them
+/// all: where a phone tells of a service differs from phone to phone, in a
+/// description of one program or in the one a whole partition shares, and
+/// the directory reads the whole of its description directory at once, so
+/// that one file it cannot make sense of leaves it describing nothing.
+pub fn publish_descriptions(wanted: &[String]) -> Result<()> {
     let into = Path::new(RECOVERY_DESCRIPTIONS);
     fs::create_dir_all(into).with_context(|| format!("make {}", into.display()))?;
     // Both directories read these as the users their init scripts name,
     // and what the recovery makes under its own umask is root's alone: the
-    // folder and each description are given the modes the system's own
-    // copies have.
+    // folder and the description are given the modes the system's own have.
     fs::set_permissions(into, std::os::unix::fs::PermissionsExt::from_mode(0o755))
         .with_context(|| format!("open {} to every user", into.display()))?;
-    let mut copied = 0;
-    let mut take = |from: &Path, text: &str| -> Result<()> {
-        let name = from.file_name().with_context(|| format!("{} names no file", from.display()))?;
-        let to = into.join(name);
-        fs::write(&to, as_framework(text)).with_context(|| format!("copy {}", from.display()))?;
-        fs::set_permissions(&to, std::os::unix::fs::PermissionsExt::from_mode(0o644))
-            .with_context(|| format!("let every user read {}", to.display()))?;
-        copied += 1;
-        Ok(())
-    };
-    for dir in DESCRIPTIONS {
-        let listing = match fs::read_dir(dir) {
-            Ok(listing) => listing,
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => continue,
-            Err(e) => return Err(e).with_context(|| format!("read {dir}")),
-        };
-        for entry in listing {
-            let from = entry.with_context(|| format!("read {dir}"))?.path();
-            if from.extension().is_none_or(|e| e != "xml") {
-                continue;
-            }
-            let text = fs::read_to_string(&from).with_context(|| format!("read {}", from.display()))?;
-            if wanted.iter().any(|w| describes(&text, w)) {
-                take(&from, &text)?;
-            }
-        }
+    let to = into.join(PHONE_DESCRIPTION);
+    // A service told of twice has the directory take none of what it
+    // reads, so what the descriptions the recovery ships with tell of
+    // already, as they do of the boot control on some phones, is left out.
+    let mut shipped = vec![PathBuf::from(RECOVERY_MANIFEST)];
+    for entry in fs::read_dir(into).with_context(|| format!("read {}", into.display()))? {
+        shipped.push(
+            entry
+                .with_context(|| format!("read {}", into.display()))?
+                .path(),
+        );
     }
-    // The platform's own descriptions, which are not in the folder above: one
-    // file per build of the hardware stack, named after the platform. Only the
-    // running platform's describes hardware that is here, so only it is read.
-    if let Some(platform) = skyward_sys::prop("ro.board.platform") {
-        for dir in PLATFORM_DESCRIPTIONS {
-            let from = Path::new(dir).join(format!("manifest_{platform}.xml"));
-            let Ok(text) = fs::read_to_string(&from) else { continue };
-            if wanted.iter().any(|w| describes(&text, w)) {
-                take(&from, &text)?;
-            }
-        }
+    let mut told = Vec::new();
+    for path in shipped
+        .iter()
+        .filter(|p| **p != to && p.extension().is_some_and(|e| e == "xml") && p.is_file())
+    {
+        let text = fs::read_to_string(path).with_context(|| format!("read {}", path.display()))?;
+        let services = skyward_programs::description::read(&text)
+            .with_context(|| format!("read {}", path.display()))?;
+        told.extend(
+            services
+                .iter()
+                .map(skyward_programs::description::Described::name),
+        );
     }
-    for file in files {
-        let from = Path::new(file);
-        // The configuration names a description for each service it lists,
-        // and a phone's build need not carry every one of them: a missing
-        // file is left out rather than failing the whole set, which would
-        // leave even the services whose descriptions are there unknown to
-        // the directory.
-        match fs::read_to_string(from) {
-            Ok(text) => take(from, &text)?,
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-                eprintln!("no description at {file}; the service it belongs to goes without")
-            }
-            Err(e) => return Err(e).with_context(|| format!("read {file}")),
-        }
-    }
+    let untold: Vec<String> = wanted
+        .iter()
+        .filter(|name| !told.contains(name))
+        .cloned()
+        .collect();
+    fs::write(&to, skyward_programs::description::offering(&untold)?)
+        .with_context(|| format!("write {}", to.display()))?;
+    fs::set_permissions(&to, std::os::unix::fs::PermissionsExt::from_mode(0o644))
+        .with_context(|| format!("let every user read {}", to.display()))?;
     let rewritten = say_framework(into)?;
-    if copied > 0 || rewritten > 0 {
-        // The directory reads the descriptions once and keeps to them, so
-        // it has to start again to see these. It comes back knowing nothing
-        // of what had registered with it, and nothing registers again by
-        // itself, so init starts each of those services again, as the
-        // installed system's init does whenever its directory restarts.
+    // The directory reads the descriptions once and keeps to them, so one
+    // that read them before these were written has to start again to see
+    // these. One an earlier run of the recovery service had start again
+    // knows them already, and is left with what has registered with it
+    // since.
+    let binder = skyward_binder::driver::Binder::open()?;
+    // The first it does not know described settles that it starts again.
+    let mut unknown = false;
+    for name in wanted {
+        if !skyward_binder::service::declared(&binder, name).with_context(|| {
+            format!("ask the service directory whether it knows {name} described")
+        })? {
+            unknown = true;
+            break;
+        }
+    }
+    if unknown || rewritten > 0 {
+        // It comes back knowing nothing of what had registered with it,
+        // and nothing registers again by itself, so init starts each of
+        // those services again, as the installed system's init does
+        // whenever its directory restarts.
         let registered = registered()?;
         let was = crate::services::running(DIRECTORY_PROGRAM);
-        skyward_sys::set_prop("ctl.restart", DIRECTORY_SERVICE).context("have the service directory start again")?;
+        skyward_sys::set_prop("ctl.restart", DIRECTORY_SERVICE)
+            .context("have the service directory start again")?;
         answering_again(was)?;
         register_again(&registered)?;
     }
-    Ok(copied)
+    Ok(())
 }
 
 /// What has registered with the service directory, each with the init
 /// service whose process serves it; the directory's own entry is left out.
 fn registered() -> Result<Vec<(String, String)>> {
-    let Some(directory) = crate::services::running(DIRECTORY_PROGRAM) else { return Ok(Vec::new()) };
+    let Some(directory) = crate::services::running(DIRECTORY_PROGRAM) else {
+        return Ok(Vec::new());
+    };
     let binder = skyward_binder::driver::Binder::open()?;
     let started = skyward_sys::props(SERVICE_PIDS);
     let mut out = Vec::new();
     for name in skyward_binder::service::names(&binder)? {
-        let Some(service) = skyward_binder::service::find(&binder, &name)? else { continue };
-        let pid = skyward_binder::service::pid(&service).with_context(|| format!("ask which process serves {name}"))?;
+        let Some(service) = skyward_binder::service::find(&binder, &name)? else {
+            continue;
+        };
+        let pid = skyward_binder::service::pid(&service)
+            .with_context(|| format!("ask which process serves {name}"))?;
         if pid == directory {
             continue;
         }
@@ -355,19 +384,27 @@ fn registered() -> Result<Vec<(String, String)>> {
 /// out the pause it keeps between two starts of a service, seconds after
 /// the service last started; stopping it and starting it does not.
 fn register_again(registered: &[(String, String)]) -> Result<()> {
-    let services: BTreeSet<&str> = registered.iter().map(|(_, service)| service.as_str()).collect();
+    let services: BTreeSet<&str> = registered
+        .iter()
+        .map(|(_, service)| service.as_str())
+        .collect();
     for service in &services {
-        skyward_sys::set_prop("ctl.stop", service).with_context(|| format!("have init stop {service}"))?;
+        skyward_sys::set_prop("ctl.stop", service)
+            .with_context(|| format!("have init stop {service}"))?;
     }
     for service in &services {
         skyward_sys::wait_prop(&format!("init.svc.{service}"), "stopped", STOP_TIMEOUT)?;
-        skyward_sys::set_prop("ctl.start", service).with_context(|| format!("have init start {service} again"))?;
+        skyward_sys::set_prop("ctl.start", service)
+            .with_context(|| format!("have init start {service} again"))?;
     }
     let binder = skyward_binder::driver::Binder::open()?;
     let until = Instant::now() + REGISTER_TIMEOUT;
     for (name, service) in registered {
         while skyward_binder::service::find(&binder, name)?.is_none() {
-            ensure!(Instant::now() < until, "{name} has not registered again since init started {service} again");
+            ensure!(
+                Instant::now() < until,
+                "{name} has not registered again since init started {service} again"
+            );
             std::thread::sleep(Duration::from_millis(50));
         }
         skyward_sys::kmsg(&format!("{name} registered again from {service}"))?;
@@ -380,37 +417,9 @@ fn register_again(registered: &[(String, String)]) -> Result<()> {
 /// into the place both readers take as the framework's, and the newer of
 /// the two readers drops the whole set over one description that says it
 /// is the phone's.
-///
-/// Its version is brought down to the oldest one for the same reason. The
-/// reader is the one the recovery was built with, and it drops the whole
-/// set over a version it does not know: a description written for a build
-/// of the platform newer than the recovery says so, and then nothing
-/// registers at all.
 fn as_framework(text: &str) -> String {
-    let text = text.replace("type=\"device\"", "type=\"framework\"").replace("type='device'", "type='framework'");
-    oldest_version(&text)
-}
-
-/// The oldest version a description can name, which every reader knows.
-const OLDEST_VERSION: &str = "1.0";
-
-/// The text with the version on its `<manifest …>` line made
-/// [`OLDEST_VERSION`], or as it is when it names that version already or
-/// names none.
-fn oldest_version(text: &str) -> String {
-    const SAID: &str = "version=";
-    let Some(start) = text.find("<manifest") else { return text.to_string() };
-    let Some(element) = text[start..].split_once('>').map(|(element, _)| element) else { return text.to_string() };
-    let Some(at) = element.find(SAID) else { return text.to_string() };
-    let rest = &element[at + SAID.len()..];
-    let Some(quote) = rest.chars().next().filter(|c| *c == '"' || *c == '\'') else { return text.to_string() };
-    let Some(end) = rest[1..].find(quote).map(|e| e + 1) else { return text.to_string() };
-    if rest[1..end] == *OLDEST_VERSION {
-        return text.to_string();
-    }
-    let from = start + at;
-    let to = start + at + SAID.len() + end + 1;
-    format!("{}version={quote}{OLDEST_VERSION}{quote}{}", &text[..from], &text[to..])
+    text.replace("type=\"device\"", "type=\"framework\"")
+        .replace("type='device'", "type='framework'")
 }
 
 /// Say the same of the descriptions already there, which a recovery ships
@@ -418,7 +427,9 @@ fn oldest_version(text: &str) -> String {
 fn say_framework(dir: &Path) -> Result<usize> {
     let mut rewritten = 0;
     for entry in fs::read_dir(dir).with_context(|| format!("read {}", dir.display()))? {
-        let path = entry.with_context(|| format!("read {}", dir.display()))?.path();
+        let path = entry
+            .with_context(|| format!("read {}", dir.display()))?
+            .path();
         if path.extension().is_none_or(|e| e != "xml") {
             continue;
         }
@@ -430,15 +441,6 @@ fn say_framework(dir: &Path) -> Result<usize> {
         }
     }
     Ok(rewritten)
-}
-
-/// Whether a description is of the service registered under `name`, which
-/// reads as the interface and then the instance: the description names the
-/// two separately.
-fn describes(text: &str, name: &str) -> bool {
-    let Some((interface, instance)) = name.rsplit_once('/') else { return false };
-    let Some((package, interface)) = interface.rsplit_once('.') else { return false };
-    text.contains(package) && text.contains(&format!("{interface}/{instance}"))
 }
 
 /// Wait until the service directory is a new process and takes calls
@@ -457,55 +459,5 @@ fn answering_again(was: Option<u32>) -> Result<()> {
             anyhow::bail!("the service directory did not come back");
         }
         std::thread::sleep(std::time::Duration::from_millis(100));
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::as_framework;
-
-    #[test]
-    fn a_description_of_the_phones_own_hardware_is_taken_as_the_frameworks() {
-        assert_eq!(
-            as_framework("<manifest version=\"8.0\" type=\"device\">\n"),
-            "<manifest version=\"1.0\" type=\"framework\">\n"
-        );
-        assert_eq!(
-            as_framework("<manifest version='8.0' type='device'>"),
-            "<manifest version='1.0' type='framework'>"
-        );
-    }
-
-    #[test]
-    fn a_description_written_for_a_newer_platform_is_read_as_the_oldest_version() {
-        // This is the one that stopped the boot: the description the
-        // recovery carries for se_omapi says it was written for a version
-        // the recovery's own reader does not know, and the reader then drops
-        // every description there is, so no service registers at all.
-        assert_eq!(
-            as_framework("<manifest version=\"9.0\" type=\"framework\">\n"),
-            "<manifest version=\"1.0\" type=\"framework\">\n"
-        );
-        assert_eq!(
-            as_framework("<manifest version='9.0' type='framework'>"),
-            "<manifest version='1.0' type='framework'>"
-        );
-    }
-
-    #[test]
-    fn a_description_that_already_names_the_oldest_version_is_left_as_it_is() {
-        for text in [
-            "<manifest version=\"1.0\" type=\"framework\"><hal/></manifest>\n",
-            "<manifest type=\"framework\"><hal/></manifest>\n",
-        ] {
-            assert!(as_framework(text) == text, "{text}");
-        }
-    }
-
-    #[test]
-    fn only_the_version_of_the_description_itself_is_brought_down() {
-        let said = "<!-- version=\"9.0\" -->\n<manifest version=\"7.0\" type=\"framework\">\n    <hal version=\"4.0\"/>\n</manifest>\n";
-        let want = "<!-- version=\"9.0\" -->\n<manifest version=\"1.0\" type=\"framework\">\n    <hal version=\"4.0\"/>\n</manifest>\n";
-        assert_eq!(as_framework(said), want);
     }
 }

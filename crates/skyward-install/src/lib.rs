@@ -114,6 +114,9 @@ pub enum Event {
     /// The install wrote over this recovery in the recovery partitions,
     /// which the screen asked to keep: how writing it back went.
     Reflashed(Reflash),
+    /// Both AVB checks were to be turned off after the install, and how
+    /// that went.
+    Avb(Avb),
     /// In rescue, the computer asked for all user data to be erased: the
     /// screen erases it and says how that went with [`Command::Wiped`].
     Wipe,
@@ -135,6 +138,19 @@ pub enum Reflash {
     Written(Vec<Slot>),
     /// It could not be, for this reason.
     Failed(String),
+}
+
+/// Turning AVB off after an install, and how it went.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Avb {
+    /// The slot whose vbmeta was changed; `None` where the recovery changed
+    /// both slots' top-level vbmeta, as this fork does on the phones it is
+    /// built for, or where the slot could not be read at all.
+    pub slot: Option<Slot>,
+    /// `Ok(None)` where the checks were already off, `Ok(Some(names))` where
+    /// they were turned off and the partitions changed, and why it did not
+    /// happen.
+    pub done: Result<Option<String>, String>,
 }
 
 /// How far the work is.

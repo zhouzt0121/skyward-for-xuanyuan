@@ -39,7 +39,10 @@ pub struct Waiting {
 /// owner's files, and a second space holds nobody else's password in a
 /// recovery's hands.
 pub fn ask(waiting: &[Waiting]) -> Option<u32> {
-    waiting.iter().find(|w| w.user == OWNER && !w.made_up).map(|w| w.user)
+    waiting
+        .iter()
+        .find(|w| w.user == OWNER && !w.made_up)
+        .map(|w| w.user)
 }
 
 /// The users a page may offer to open by name: every one whose own files
@@ -47,7 +50,11 @@ pub fn ask(waiting: &[Waiting]) -> Option<u32> {
 /// owner first, then by number. These are the ones a file manager can offer
 /// to unlock when a folder of theirs is opened.
 pub fn askable(waiting: &[Waiting]) -> Vec<u32> {
-    let mut users: Vec<u32> = waiting.iter().filter(|w| !w.made_up).map(|w| w.user).collect();
+    let mut users: Vec<u32> = waiting
+        .iter()
+        .filter(|w| !w.made_up)
+        .map(|w| w.user)
+        .collect();
     users.sort_unstable();
     users
 }
@@ -59,7 +66,9 @@ pub fn askable(waiting: &[Waiting]) -> Vec<u32> {
 /// key and is not the area itself, and for every other folder.
 pub fn user_of(path: &std::path::Path) -> Option<u32> {
     let parts: Vec<_> = path.components().skip(1).collect();
-    let [first, area, number] = parts.as_slice() else { return None };
+    let [first, area, number] = parts.as_slice() else {
+        return None;
+    };
     let area = area.as_os_str().to_str()?;
     if first.as_os_str() != "data" || (area != "user" && area != "media") {
         return None;
@@ -80,9 +89,17 @@ mod tests {
         // What a phone with a second space set up keeps closed: the owner
         // and a cloned app's user, both with a screen lock of their own.
         let both = [w(0, false), w(999, false)];
-        assert_eq!(ask(&both), Some(0), "the owner only: a further user does not hold the recovery here");
+        assert_eq!(
+            ask(&both),
+            Some(0),
+            "the owner only: a further user does not hold the recovery here"
+        );
         assert_eq!(ask(&[w(0, false)]), Some(0));
-        assert_eq!(ask(&[w(999, false)]), None, "no owner among them, so nobody is asked at once");
+        assert_eq!(
+            ask(&[w(999, false)]),
+            None,
+            "no owner among them, so nobody is asked at once"
+        );
         assert_eq!(ask(&[]), None, "nothing closed");
     }
 
@@ -91,13 +108,21 @@ mod tests {
         // The owner's own files open behind a made-up credential: nothing to
         // ask, even with the owner in the list.
         assert_eq!(ask(&[w(0, true)]), None);
-        assert_eq!(ask(&[w(0, true), w(999, false)]), None, "a further user alone is not asked for");
+        assert_eq!(
+            ask(&[w(0, true), w(999, false)]),
+            None,
+            "a further user alone is not asked for"
+        );
     }
 
     #[test]
     fn every_user_a_page_may_open_by_name_is_offered_owner_first() {
         let both = [w(999, false), w(0, false), w(10, true)];
-        assert_eq!(askable(&both), vec![0, 999], "the owner first, then by number; a made-up one never");
+        assert_eq!(
+            askable(&both),
+            vec![0, 999],
+            "the owner first, then by number; a made-up one never"
+        );
         assert_eq!(askable(&[]), Vec::<u32>::new());
         assert_eq!(askable(&[w(999, false)]), vec![999]);
     }
@@ -108,8 +133,16 @@ mod tests {
         // user stays closed, and the recovery is to be usable rather than
         // held at that user's prompt.
         let after_owner = [w(999, false)];
-        assert_eq!(ask(&after_owner), None, "the owner's files are open, so nothing is asked");
-        assert_eq!(askable(&after_owner), vec![999], "yet the file manager may offer to open it");
+        assert_eq!(
+            ask(&after_owner),
+            None,
+            "the owner's files are open, so nothing is asked"
+        );
+        assert_eq!(
+            askable(&after_owner),
+            vec![999],
+            "yet the file manager may offer to open it"
+        );
     }
 
     #[test]
@@ -118,7 +151,11 @@ mod tests {
         assert_eq!(at("/data/user/0"), Some(0));
         assert_eq!(at("/data/user/999"), Some(999));
         assert_eq!(at("/data/media/10"), Some(10));
-        assert_eq!(at("/data/user/999/DCIM"), None, "a folder inside one is not the area itself");
+        assert_eq!(
+            at("/data/user/999/DCIM"),
+            None,
+            "a folder inside one is not the area itself"
+        );
         assert_eq!(at("/data/media"), None, "the area is not a user's own");
         assert_eq!(at("/data/system"), None);
         assert_eq!(at("/sdcard/DCIM"), None);

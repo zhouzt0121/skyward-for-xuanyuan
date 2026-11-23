@@ -1,25 +1,25 @@
-use anyhow::{bail, ensure, Context, Result};
+use anyhow::{Context, Result, bail, ensure};
 use procfs::process::{FDTarget, MMapPath, Process};
 use skyward_config::Service;
+use skyward_programs::script::{Socket, SocketKind};
+use skyward_programs::secure::Started;
 use skyward_sys::ueventd;
 use skyward_vab::Mounted;
 use std::collections::{BTreeSet, HashMap};
 use std::fs;
 use std::io;
-use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
+use std::os::fd::{AsRawFd, FromRawFd, OwnedFd, RawFd};
+use std::os::unix::ffi::OsStrExt;
 use std::os::unix::fs::PermissionsExt;
 use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
-use std::process::{Command, Stdio};
-use std::sync::{Mutex, OnceLock};
+use std::process::{Command, ExitStatus, Stdio};
 use std::thread;
 use std::time::{Duration, Instant};
 
 /// A program that ends sooner than this after starting waits this long
-/// before it is started again. A phone's secure-world programs may fail until
-/// their TEE listener is ready; a one-second restart loop only hides the
-/// first useful error under hundreds of identical ones.
-const RESTART_DELAY: Duration = Duration::from_secs(5);
+/// before it is started again.
+const RESTART_DELAY: Duration = Duration::from_secs(1);
 
 /// How long a program gets to become what it says it will be.
 const READY_TIMEOUT: Duration = Duration::from_secs(20);
@@ -31,139 +31,294 @@ const CAP_LAST_CAP: &str = "/proc/sys/kernel/cap_last_cap";
 /// The version of the kernel's capability sets that holds 64 of them.
 const CAPABILITY_VERSION_3: u32 = 0x2008_0522;
 
+/// Where init makes the sockets it hands its programs, and what it names
+/// the variable that tells a program which of its open files one of them
+/// is: this and then the socket's name.
+const SOCKETS: &str = "/dev/socket";
+const SOCKET_VARIABLE: &str = "ANDROID_SOCKET_";
+
+/// How many callers init has a socket it listens on hold while they wait:
+/// as many as the kernel lets it.
+const WAITING_CALLERS: libc::c_int = 1 << 30;
+
+/// The variable a program's loader reads the folders of its libraries
+/// from.
+const LIBRARY_PATH: &str = "LD_LIBRARY_PATH";
+
 /// Keep each program running, one thread per program: start it, and start
 /// it again whenever it exits. They are started in the order they are
-/// written, and one that says what it will be ready with holds up those
+/// given, and one that says what it will be ready with holds up those
 /// after it until it is. A program still running from an earlier instance
-/// of the recovery service is waited on instead of started twice. A
-/// program that runs once is run to its end where it stands in that order.
-/// Each runs as the user, in the groups and with the capabilities the
-/// phone's own init gives it.
+/// of the recovery service is waited on instead of started twice, unless
+/// it is one to start anew, which is ended first. A program that runs once
+/// is run to its end where it stands in that order. Each runs as the user,
+/// in the groups and with the capabilities the phone's own init gives it,
+/// with the sockets and the environment init hands it.
 ///
 /// `libraries` is a directory of shared libraries every one of them may
 /// need, searched after whatever it names itself.
-pub fn start(services: &[Service], libraries: Option<&Path>) -> Result<()> {
-    let known = ueventd::accounts(&ueventd::PASSWD_FILES.iter().chain(&ueventd::GROUP_FILES).copied().collect::<Vec<_>>());
-    for s in services {
-        // A program this build of the phone does not carry is left out
-        // rather than ending the rest: the configuration is written for the
-        // phone, and what it names need not all be there. The key service
-        // and the boot control are what the data partition and the slots
-        // wait for, and neither is worth losing to a program that is not.
-        if !Path::new(&s.path).is_file() {
-            skyward_sys::kmsg(&format!("{} is missing; it is not started", s.path))?;
-            continue;
-        }
-        let mut s = s.clone();
-        if let Some(dir) = libraries {
-            s.libraries.push(dir.to_string_lossy().into_owned());
-        }
-        let sockets = match listeners(&s, &known) {
-            Ok(sockets) => sockets,
-            Err(e) => {
-                skyward_sys::kmsg(&format!("{}: its socket cannot be made, so it is not started: {e:#}", s.path))?;
-                continue;
-            }
-        };
-        let who = Credentials::of(&s, &known)?;
+pub fn start(programs: &[Started], libraries: Option<&Path>) -> Result<()> {
+    let known = accounts();
+    for program in programs {
+        let (s, who, given) = readied(program, libraries, &known)?;
         if s.oneshot {
-            let status = command(&s, &who, &sockets).status().with_context(|| format!("run {}", s.path))?;
-            ensure!(status.success(), "{} {} ended: {status}", s.path, s.args.join(" "));
+            let status = to_its_end(&s, &who, &given)?;
+            ensure!(
+                status.success(),
+                "{} {} ended: {status}",
+                s.path,
+                s.args.join(" ")
+            );
             skyward_sys::kmsg(&format!("ran {} {}", s.path, s.args.join(" ")))?;
             continue;
         }
-        let waiting = s.clone();
-        let name = Path::new(&s.path).file_name().map_or_else(|| s.path.clone(), |n| n.to_string_lossy().into_owned());
-        thread::Builder::new().name(name).spawn(move || supervise(&s, &who, sockets)).context("start a supervising thread")?;
-        // A program that does not become what it says it will be holds up
-        // the pages no longer: it is said in the kernel log and the next
-        // program starts. One that registers later is still found by what
-        // looks for it.
-        if let Err(e) = ready(&waiting) {
-            skyward_sys::kmsg(&format!("{e:#}"))?;
+        if program.anew {
+            end_left(&s)?;
         }
+        // A property the program an earlier run of the recovery service
+        // started has set says nothing of the one started now, which the
+        // programs after it wait for.
+        if let Some(property) = s
+            .ready_property
+            .as_ref()
+            .filter(|_| running(&s.path).is_none())
+            && skyward_sys::prop(property).is_some_and(|value| !value.is_empty())
+        {
+            skyward_sys::set_prop(property, "")?;
+        }
+        let waiting = s.clone();
+        let name = Path::new(&s.path)
+            .file_name()
+            .map_or_else(|| s.path.clone(), |n| n.to_string_lossy().into_owned());
+        thread::Builder::new()
+            .name(name)
+            .spawn(move || supervise(&s, &who, &given))
+            .context("start a supervising thread")?;
+        ready(&waiting)?;
     }
     Ok(())
 }
 
-/// A socket made as the phone's init makes it, with the descriptor Android
-/// hands the service in `ANDROID_SOCKET_<name>`.
-struct Listening {
-    name: String,
-    fd: OwnedFd,
+/// Run `program` once to its end and give how it ended, as init runs a
+/// program one of its scripts has it run before it goes on: however the
+/// program ends, init goes on, and so may whoever asks here. It runs as
+/// [`start`] runs one, finding its libraries in the folders it names.
+pub fn once(program: &Started) -> Result<ExitStatus> {
+    let (s, who, given) = readied(program, None, &accounts())?;
+    to_its_end(&s, &who, &given)
 }
 
-/// The listeners this recovery has made, kept so a service that is started
-/// again gets the same listener rather than a second socket at its address.
-static LISTENERS: OnceLock<Mutex<HashMap<String, Listening>>> = OnceLock::new();
+/// The accounts the phone knows, each by its name.
+fn accounts() -> HashMap<String, u32> {
+    ueventd::accounts(
+        &ueventd::PASSWD_FILES
+            .iter()
+            .chain(&ueventd::GROUP_FILES)
+            .copied()
+            .collect::<Vec<_>>(),
+    )
+}
 
-/// Give the service its listening sockets. Android's socket helper takes the
-/// first free descriptor at or above 50 and duplicates it there, so that is
-/// what the environment variable names. The duplicate is close-on-exec, so no
-/// other program the recovery starts is handed it; the one it is for clears it
-/// in its own child, just before the exec.
-fn listeners(s: &Service, known: &HashMap<String, u32>) -> Result<Vec<Listening>> {
-    let kept = LISTENERS.get_or_init(|| Mutex::new(HashMap::new()));
-    let mut kept = kept.lock().expect("no panic while holding the service sockets");
-    s.sockets
-        .iter()
-        .map(|socket| {
-            if let std::collections::hash_map::Entry::Vacant(slot) = kept.entry(socket.name.clone()) {
-                slot.insert(listen(socket, known)?);
-            }
-            let socket = &kept[&socket.name];
-            let fd = unsafe { libc::fcntl(socket.fd.as_raw_fd(), libc::F_DUPFD_CLOEXEC, 50) };
-            if fd < 0 {
-                return Err(io::Error::last_os_error()).context("give the service its socket descriptor");
-            }
-            Ok(Listening { name: socket.name.clone(), fd: unsafe { OwnedFd::from_raw_fd(fd) } })
+/// What `program` is started with, worked out before it is: the program
+/// itself, which has to be there, with `libraries` after its own, who it
+/// runs as and what init hands it.
+fn readied(
+    program: &Started,
+    libraries: Option<&Path>,
+    known: &HashMap<String, u32>,
+) -> Result<(Service, Credentials, Given)> {
+    let mut s = program.service.clone();
+    if !Path::new(&s.path).is_file() {
+        bail!("{} is missing; is its partition mounted?", s.path);
+    }
+    if let Some(dir) = libraries {
+        s.libraries.push(dir.to_string_lossy().into_owned());
+    }
+    let who = Credentials::of(&s, known)?;
+    let given = Given::of(program, known)?;
+    Ok((s, who, given))
+}
+
+/// Start the program, wait until it ends and give how it ended.
+fn to_its_end(s: &Service, who: &Credentials, given: &Given) -> Result<ExitStatus> {
+    let handed = given.make()?;
+    command(s, who, given, &handed)
+        .status()
+        .with_context(|| format!("run {}", s.path))
+}
+
+/// What init hands a program as it starts it besides what its line gives
+/// it, worked out before the program is started: the sockets it makes for
+/// it, each with the user and the group it is given to, and what it sets
+/// in its environment.
+#[derive(Debug, Clone)]
+struct Given {
+    sockets: Vec<(Socket, libc::uid_t, libc::gid_t)>,
+    environment: Vec<(String, String)>,
+}
+
+impl Given {
+    /// What `program` is handed, by the names the phone gives its
+    /// accounts: a socket that names no user or no group is root's.
+    fn of(program: &Started, known: &HashMap<String, u32>) -> Result<Self> {
+        let path = &program.service.path;
+        let id = |name: &Option<String>| match name {
+            Some(name) => ueventd::account(known, name)
+                .with_context(|| format!("{path}: the phone has no account named {name}")),
+            None => Ok(0),
+        };
+        let sockets = program
+            .sockets
+            .iter()
+            .map(|s| Ok((s.clone(), id(&s.user)?, id(&s.group)?)))
+            .collect::<Result<Vec<_>>>()?;
+        Ok(Self {
+            sockets,
+            environment: program.environment.clone(),
         })
-        .collect()
+    }
+
+    /// Make each socket, as init makes them afresh every time it starts
+    /// the program, and give each with the variable that names it to the
+    /// program: the socket's name, with whatever in it is neither a letter
+    /// nor a digit turned into an underscore.
+    fn make(&self) -> Result<Vec<(String, OwnedFd)>> {
+        let mut handed = Vec::new();
+        for (socket, uid, gid) in &self.sockets {
+            let name: String = socket
+                .name
+                .chars()
+                .map(|c| if c.is_ascii_alphanumeric() { c } else { '_' })
+                .collect();
+            handed.push((
+                format!("{SOCKET_VARIABLE}{name}"),
+                make_socket(socket, *uid, *gid)?,
+            ));
+        }
+        Ok(handed)
+    }
 }
 
-/// Make one listening socket as the phone's init does.
-fn listen(socket: &skyward_config::InitSocket, known: &HashMap<String, u32>) -> Result<Listening> {
-    let uid = ueventd::account(known, &socket.user).with_context(|| format!("no user {}", socket.user))?;
-    let gid = ueventd::account(known, &socket.group).with_context(|| format!("no group {}", socket.group))?;
-    let kind = match socket.kind.as_str() {
-        "stream" => libc::SOCK_STREAM,
-        "dgram" => libc::SOCK_DGRAM,
-        "seqpacket" => libc::SOCK_SEQPACKET,
-        _ => unreachable!("the configuration checks the socket kind"),
+/// Make the socket under [`SOCKETS`] as init makes it: in the place of one
+/// of its name left there, bound to its name, given to its user and its
+/// group with its mode, and listening only where its line says so, a
+/// program otherwise listening on it itself.
+fn make_socket(socket: &Socket, uid: libc::uid_t, gid: libc::gid_t) -> Result<OwnedFd> {
+    let path = Path::new(SOCKETS).join(&socket.name);
+    let kind = match socket.kind {
+        SocketKind::Stream => libc::SOCK_STREAM,
+        SocketKind::Dgram => libc::SOCK_DGRAM,
+        SocketKind::Seqpacket => libc::SOCK_SEQPACKET,
+    };
+    let done = |r: libc::c_int, what: &str| match r {
+        0 => Ok(()),
+        _ => Err(io::Error::last_os_error())
+            .with_context(|| format!("{what} the socket {}", path.display())),
     };
     let fd = unsafe { libc::socket(libc::AF_UNIX, kind | libc::SOCK_CLOEXEC, 0) };
     if fd < 0 {
-        return Err(io::Error::last_os_error()).context("make a service socket");
+        return Err(io::Error::last_os_error())
+            .with_context(|| format!("make the socket {}", path.display()));
     }
     let fd = unsafe { OwnedFd::from_raw_fd(fd) };
-    let path = Path::new("/dev/socket").join(&socket.name);
-    fs::create_dir_all("/dev/socket").context("make /dev/socket")?;
-    // One left by a recovery that ended and was started again would
-    // refuse the bind; nothing listens on it any more.
-    let _ = fs::remove_file(&path);
-    let address = socket_address(&path);
-    if unsafe { libc::bind(fd.as_raw_fd(), (&address.0 as *const libc::sockaddr_un).cast(), address.1) } != 0 {
-        return Err(io::Error::last_os_error()).with_context(|| format!("bind {}", path.display()));
+    match fs::remove_file(&path) {
+        Ok(()) => {}
+        Err(e) if e.kind() == io::ErrorKind::NotFound => {}
+        Err(e) => {
+            return Err(e).with_context(|| format!("take away the {} left there", path.display()));
+        }
     }
-    std::os::unix::fs::chown(&path, Some(uid), Some(gid)).with_context(|| format!("give {}", path.display()))?;
-    fs::set_permissions(&path, fs::Permissions::from_mode(socket.mode)).with_context(|| format!("set {}", path.display()))?;
-    if kind != libc::SOCK_DGRAM && unsafe { libc::listen(fd.as_raw_fd(), 4) } != 0 {
-        return Err(io::Error::last_os_error()).context("listen on a service socket");
+    if socket.passcred {
+        let on: libc::c_int = 1;
+        let size = std::mem::size_of::<libc::c_int>() as libc::socklen_t;
+        done(
+            unsafe {
+                libc::setsockopt(
+                    fd.as_raw_fd(),
+                    libc::SOL_SOCKET,
+                    libc::SO_PASSCRED,
+                    (&on as *const libc::c_int).cast(),
+                    size,
+                )
+            },
+            "have each peer's credentials come over",
+        )?;
     }
-    Ok(Listening { name: socket.name.clone(), fd })
-}
-
-/// A Unix-domain socket address and its exact length, without trailing NULs.
-fn socket_address(path: &Path) -> (libc::sockaddr_un, libc::socklen_t) {
-    use std::os::unix::ffi::OsStrExt;
-    let bytes = path.as_os_str().as_bytes();
     let mut address: libc::sockaddr_un = unsafe { std::mem::zeroed() };
     address.sun_family = libc::AF_UNIX as libc::sa_family_t;
-    for (slot, byte) in address.sun_path.iter_mut().zip(bytes) {
-        *slot = *byte as _;
+    let name = path.as_os_str().as_bytes();
+    // The name ends in a zero byte, which the address is already full of.
+    ensure!(
+        name.len() < address.sun_path.len(),
+        "{} is too long a name for a socket",
+        path.display()
+    );
+    for (to, from) in address.sun_path.iter_mut().zip(name) {
+        *to = *from as libc::c_char;
     }
-    let length = (std::mem::size_of::<libc::sa_family_t>() + bytes.len() + 1) as libc::socklen_t;
-    (address, length)
+    let size = std::mem::size_of::<libc::sockaddr_un>() as libc::socklen_t;
+    done(
+        unsafe {
+            libc::bind(
+                fd.as_raw_fd(),
+                (&address as *const libc::sockaddr_un).cast(),
+                size,
+            )
+        },
+        "bind",
+    )?;
+    std::os::unix::fs::lchown(&path, Some(uid), Some(gid))
+        .with_context(|| format!("give the socket {} to {uid}:{gid}", path.display()))?;
+    fs::set_permissions(&path, fs::Permissions::from_mode(socket.mode)).with_context(|| {
+        format!(
+            "give the socket {} the mode {:o}",
+            path.display(),
+            socket.mode
+        )
+    })?;
+    if socket.listen {
+        done(
+            unsafe { libc::listen(fd.as_raw_fd(), WAITING_CALLERS) },
+            "listen on",
+        )?;
+    }
+    Ok(fd)
+}
+
+/// End the program an earlier run of the recovery service left running,
+/// and wait until the service it was ready with is gone from the service
+/// directory, so that waiting for the one started next waits for that one.
+fn end_left(s: &Service) -> Result<()> {
+    let Some(pid) = running(&s.path) else {
+        return Ok(());
+    };
+    if unsafe { libc::kill(pid as libc::pid_t, libc::SIGKILL) } != 0 {
+        let e = io::Error::last_os_error();
+        // It ended between being found and being told to.
+        if e.raw_os_error() != Some(libc::ESRCH) {
+            return Err(e).with_context(|| {
+                format!(
+                    "end {}, pid {pid}, left by an earlier recovery service",
+                    s.path
+                )
+            });
+        }
+    }
+    wait_for(pid)?;
+    let until = Instant::now() + READY_TIMEOUT;
+    while s.ready_service.as_deref().is_some_and(registered) {
+        ensure!(
+            Instant::now() < until,
+            "{}, pid {pid}, is ended and still registered {} seconds on",
+            s.path,
+            READY_TIMEOUT.as_secs()
+        );
+        thread::sleep(READY_POLL);
+    }
+    skyward_sys::kmsg(&format!(
+        "{}: pid {pid}, left by an earlier recovery service, ended to be started anew",
+        s.path
+    ))
 }
 
 /// Who a program runs as and what of root's it keeps, as the phone's own
@@ -193,20 +348,47 @@ impl Credentials {
     /// Who `s` runs as, by the names the phone gives its accounts: root,
     /// in no other group, keeping all of root's, where it names none.
     fn of(s: &Service, known: &HashMap<String, u32>) -> Result<Self> {
-        let id = |name: &String| ueventd::account(known, name).with_context(|| format!("{}: the phone has no account named {name}", s.path));
+        let id = |name: &String| {
+            ueventd::account(known, name)
+                .with_context(|| format!("{}: the phone has no account named {name}", s.path))
+        };
         let uid = s.user.as_ref().map(id).transpose()?.unwrap_or(0);
         let mut groups = s.groups.iter().map(id).collect::<Result<Vec<_>>>()?;
-        let gid = if groups.is_empty() { 0 } else { groups.remove(0) };
+        let gid = if groups.is_empty() {
+            0
+        } else {
+            groups.remove(0)
+        };
         let kept = if s.capabilities.is_empty() {
             None
         } else {
-            let bit = |name: &str| skyward_config::capability(name).map(|n| 1u64 << n).with_context(|| format!("{}: {name} is not a capability", s.path));
-            let mask = s.capabilities.iter().try_fold(0, |mask, c| bit(c).map(|b| mask | b))?;
-            let last = fs::read_to_string(CAP_LAST_CAP).with_context(|| format!("read {CAP_LAST_CAP}"))?;
-            let last = last.trim().parse().with_context(|| format!("read the number in {CAP_LAST_CAP}"))?;
-            Some(Kept { mask, dropping: mask | bit("SETPCAP")?, last })
+            let bit = |name: &str| {
+                skyward_config::capability(name)
+                    .map(|n| 1u64 << n)
+                    .with_context(|| format!("{}: {name} is not a capability", s.path))
+            };
+            let mask = s
+                .capabilities
+                .iter()
+                .try_fold(0, |mask, c| bit(c).map(|b| mask | b))?;
+            let last =
+                fs::read_to_string(CAP_LAST_CAP).with_context(|| format!("read {CAP_LAST_CAP}"))?;
+            let last = last
+                .trim()
+                .parse()
+                .with_context(|| format!("read the number in {CAP_LAST_CAP}"))?;
+            Some(Kept {
+                mask,
+                dropping: mask | bit("SETPCAP")?,
+                last,
+            })
         };
-        Ok(Self { uid, gid, groups, kept })
+        Ok(Self {
+            uid,
+            gid,
+            groups,
+            kept,
+        })
     }
 
     /// Become who the program runs as, in the child about to run it, as
@@ -214,8 +396,16 @@ impl Credentials {
     /// through the change where it keeps some, then drop every other one
     /// for good and hand those it keeps on through the exec.
     fn take_on(&self) -> io::Result<()> {
-        let done = |r: libc::c_int| if r == 0 { Ok(()) } else { Err(io::Error::last_os_error()) };
-        let prctl = |option: libc::c_int, a: libc::c_ulong, b: libc::c_ulong| done(unsafe { libc::prctl(option, a, b, 0 as libc::c_ulong, 0 as libc::c_ulong) });
+        let done = |r: libc::c_int| {
+            if r == 0 {
+                Ok(())
+            } else {
+                Err(io::Error::last_os_error())
+            }
+        };
+        let prctl = |option: libc::c_int, a: libc::c_ulong, b: libc::c_ulong| {
+            done(unsafe { libc::prctl(option, a, b, 0 as libc::c_ulong, 0 as libc::c_ulong) })
+        };
         if self.kept.is_some() {
             prctl(libc::PR_SET_KEEPCAPS, 1, 0)?;
         }
@@ -229,7 +419,11 @@ impl Credentials {
         }
         set_capabilities(kept.mask)?;
         for cap in (0..=kept.last).filter(|c| kept.mask & 1 << c != 0) {
-            prctl(libc::PR_CAP_AMBIENT, libc::PR_CAP_AMBIENT_RAISE as libc::c_ulong, cap.into())?;
+            prctl(
+                libc::PR_CAP_AMBIENT,
+                libc::PR_CAP_AMBIENT_RAISE as libc::c_ulong,
+                cap.into(),
+            )?;
         }
         Ok(())
     }
@@ -248,8 +442,15 @@ fn set_capabilities(mask: u64) -> io::Result<()> {
         permitted: u32,
         inheritable: u32,
     }
-    let header = Header { version: CAPABILITY_VERSION_3, pid: 0 };
-    let half = |bits: u32| Sets { effective: bits, permitted: bits, inheritable: bits };
+    let header = Header {
+        version: CAPABILITY_VERSION_3,
+        pid: 0,
+    };
+    let half = |bits: u32| Sets {
+        effective: bits,
+        permitted: bits,
+        inheritable: bits,
+    };
     let sets = [half(mask as u32), half((mask >> 32) as u32)];
     if unsafe { libc::syscall(libc::SYS_capset, &header, sets.as_ptr()) } == 0 {
         Ok(())
@@ -260,52 +461,53 @@ fn set_capabilities(mask: u64) -> io::Result<()> {
 
 /// Wait until the program has what it says it will be ready with.
 fn ready(s: &Service) -> Result<()> {
-    let waited_on = match (&s.ready_property, &s.ready_service, &s.ready_hardware_service) {
+    let waited_on = match (
+        &s.ready_property,
+        &s.ready_service,
+        &s.ready_hardware_service,
+    ) {
         (Some(p), _, _) => format!("set no {p}"),
         (_, Some(n), _) => format!("registered no {n}"),
         (_, _, Some(n)) => format!("registered no {n}"),
         _ => return Ok(()),
     };
     let until = Instant::now() + READY_TIMEOUT;
-    let mut lived = false;
     loop {
-        // A program that has already died cannot become ready. Say so now
-        // rather than waiting out twenty seconds for each dead service.
-        if running(&s.path).is_some() {
-            lived = true;
-        } else if lived || Instant::now() + READY_POLL >= until {
-            bail!("{} has already ended, so it {waited_on}", s.path);
-        }
-        if let Some(name) = &s.ready_property {
-            if skyward_sys::prop(name).is_some_and(|v| !v.is_empty()) {
-                return Ok(());
-            }
+        if let Some(name) = &s.ready_property
+            && skyward_sys::prop(name).is_some_and(|v| !v.is_empty())
+        {
+            return Ok(());
         }
         // Either directory may itself be starting again, and until it
         // answers nothing can be looked up in it.
-        if let Some(name) = &s.ready_service {
-            if registered(name) {
-                return Ok(());
-            }
+        if let Some(name) = &s.ready_service
+            && registered(name)
+        {
+            return Ok(());
         }
-        if let Some(name) = &s.ready_hardware_service {
-            if registered_hardware(name) {
-                return Ok(());
-            }
+        if let Some(name) = &s.ready_hardware_service
+            && registered_hardware(name)
+        {
+            return Ok(());
         }
         if Instant::now() >= until {
-            bail!("{} {waited_on} in {} seconds", s.path, READY_TIMEOUT.as_secs());
+            bail!(
+                "{} {waited_on} in {} seconds",
+                s.path,
+                READY_TIMEOUT.as_secs()
+            );
         }
         thread::sleep(READY_POLL);
     }
 }
 
-fn supervise(s: &Service, who: &Credentials, sockets: Vec<Listening>) -> ! {
+fn supervise(s: &Service, who: &Credentials, given: &Given) -> ! {
     loop {
         let started = Instant::now();
         let ended = match running(&s.path) {
-            Some(pid) => wait_for(pid).map(|()| format!("pid {pid}, left by an earlier recovery service, exited")),
-            None => run(s, who, &sockets),
+            Some(pid) => wait_for(pid)
+                .map(|()| format!("pid {pid}, left by an earlier recovery service, exited")),
+            None => run(s, who, given),
         };
         let line = match ended {
             Ok(how) => format!("{}: {how}", s.path),
@@ -319,54 +521,66 @@ fn supervise(s: &Service, who: &Credentials, sockets: Vec<Listening>) -> ! {
 }
 
 /// Start the program and wait for it to end.
-fn run(s: &Service, who: &Credentials, sockets: &[Listening]) -> Result<String> {
-    let mut child = command(s, who, sockets).spawn().with_context(|| format!("start {}", s.path))?;
+fn run(s: &Service, who: &Credentials, given: &Given) -> Result<String> {
+    let handed = given.make()?;
+    let mut child = command(s, who, given, &handed)
+        .spawn()
+        .with_context(|| format!("start {}", s.path))?;
+    // The program has its sockets now, and as init does, the recovery
+    // keeps none of them open itself.
+    drop(handed);
     let status = child.wait().context("wait for it")?;
     Ok(format!("pid {} ended: {status}", child.id()))
 }
 
 /// The program as it is started: with what it is given, from the top of the
-/// tree, reading and writing nothing of the recovery's, finding its
-/// libraries where it names them, and as `who`.
-fn command(s: &Service, who: &Credentials, sockets: &[Listening]) -> Command {
+/// tree, reading and writing nothing of the recovery's, with the
+/// environment init sets it and each of the sockets in `handed` under the
+/// variable that names it, finding its libraries where it names them, and
+/// as `who`. Where init sets it folders of libraries of its own, they are
+/// searched after those it is given here.
+fn command(s: &Service, who: &Credentials, given: &Given, handed: &[(String, OwnedFd)]) -> Command {
     let mut cmd = Command::new(&s.path);
-    cmd.args(&s.args).current_dir("/").stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null());
-    if !s.libraries.is_empty() {
-        cmd.env("LD_LIBRARY_PATH", s.libraries.join(":"));
+    cmd.args(&s.args)
+        .current_dir("/")
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null());
+    let mut libraries = s.libraries.clone();
+    for (name, value) in &given.environment {
+        match name == LIBRARY_PATH {
+            true => libraries.push(value.clone()),
+            false => {
+                cmd.env(name, value);
+            }
+        }
     }
-    let mut handed: Vec<libc::c_int> = Vec::with_capacity(sockets.len());
-    for socket in sockets {
-        let fd = socket.fd.as_raw_fd();
-        cmd.env(format!("ANDROID_SOCKET_{}", socket.name), fd.to_string());
-        handed.push(fd);
+    if !libraries.is_empty() {
+        cmd.env(LIBRARY_PATH, libraries.join(":"));
+    }
+    for (variable, socket) in handed {
+        cmd.env(variable, socket.as_raw_fd().to_string());
     }
     let who = who.clone();
+    let sockets: Vec<RawFd> = handed
+        .iter()
+        .map(|(_, socket)| socket.as_raw_fd())
+        .collect();
     // Only system calls run between the fork and the exec, on what was
-    // worked out before it. The sockets were duplicated close-on-exec so
-    // that no program this recovery starts is given one it was not meant
-    // to have; the exec about to happen is the one they are for, so in the
-    // child alone they are cleared for it. Without that the descriptor the
-    // environment names is already closed when the program goes to look
-    // for it, and a program that cannot start without its listener, as
-    // Qualcomm's hlosminkdaemon cannot, ends at once and is started again
-    // every few seconds for as long as the recovery runs.
+    // worked out before it. The sockets are open in the recovery so that
+    // no other program it starts gets them, and in the program about to
+    // run they have to stay open through the exec.
     unsafe {
         cmd.pre_exec(move || {
-            hand_over(&handed)?;
+            for socket in &sockets {
+                if libc::fcntl(*socket, libc::F_SETFD, 0) != 0 {
+                    return Err(io::Error::last_os_error());
+                }
+            }
             who.take_on()
         })
     };
     cmd
-}
-
-/// Let the descriptors survive the exec that follows, in the child alone.
-fn hand_over(fds: &[libc::c_int]) -> io::Result<()> {
-    for fd in fds {
-        if unsafe { libc::fcntl(*fd, libc::F_SETFD, 0) } != 0 {
-            return Err(io::Error::last_os_error());
-        }
-    }
-    Ok(())
 }
 
 /// Lock in memory every file the running programs have mapped or open on
@@ -378,23 +592,39 @@ pub fn pin(services: &[Service], mounted: &[Mounted]) -> Result<Vec<PathBuf>> {
     // A program run once has ended, and one between restarts has nothing in
     // memory to keep either.
     for s in services.iter().filter(|s| !s.oneshot) {
-        let Some(pid) = running(&s.path) else { continue };
+        let Some(pid) = running(&s.path) else {
+            continue;
+        };
         let process = Process::new(pid as i32).with_context(|| format!("open process {pid}"))?;
-        for map in process.maps().with_context(|| format!("read the mappings of {}", s.path))? {
+        for map in process
+            .maps()
+            .with_context(|| format!("read the mappings of {}", s.path))?
+        {
             if let MMapPath::Path(p) = map.pathname {
                 files.insert(p);
             }
         }
-        for fd in process.fd().with_context(|| format!("read the files {} has open", s.path))? {
-            if let FDTarget::Path(p) = fd.with_context(|| format!("read a file {} has open", s.path))?.target {
+        for fd in process
+            .fd()
+            .with_context(|| format!("read the files {} has open", s.path))?
+        {
+            if let FDTarget::Path(p) = fd
+                .with_context(|| format!("read a file {} has open", s.path))?
+                .target
+            {
                 files.insert(p);
             }
         }
     }
     let mut busy: Vec<PathBuf> = Vec::new();
     for file in files {
-        let Some(m) = mounted.iter().find(|m| file.starts_with(&m.mount_point)) else { continue };
-        if !fs::metadata(&file).with_context(|| format!("stat {}", file.display()))?.is_file() {
+        let Some(m) = mounted.iter().find(|m| file.starts_with(&m.mount_point)) else {
+            continue;
+        };
+        if !fs::metadata(&file)
+            .with_context(|| format!("stat {}", file.display()))?
+            .is_file()
+        {
             continue;
         }
         lock(&file)?;
@@ -410,16 +640,29 @@ pub fn pin(services: &[Service], mounted: &[Mounted]) -> Result<Vec<PathBuf>> {
 /// for every process that maps the file.
 fn lock(path: &Path) -> Result<()> {
     let file = fs::File::open(path).with_context(|| format!("open {}", path.display()))?;
-    let len = file.metadata().with_context(|| format!("stat {}", path.display()))?.len() as usize;
+    let len = file
+        .metadata()
+        .with_context(|| format!("stat {}", path.display()))?
+        .len() as usize;
     if len == 0 {
         return Ok(());
     }
-    let at = unsafe { libc::mmap(std::ptr::null_mut(), len, libc::PROT_READ, libc::MAP_SHARED, file.as_raw_fd(), 0) };
+    let at = unsafe {
+        libc::mmap(
+            std::ptr::null_mut(),
+            len,
+            libc::PROT_READ,
+            libc::MAP_SHARED,
+            file.as_raw_fd(),
+            0,
+        )
+    };
     if at == libc::MAP_FAILED {
         return Err(io::Error::last_os_error()).with_context(|| format!("map {}", path.display()));
     }
     if unsafe { libc::mlock(at, len) } != 0 {
-        return Err(io::Error::last_os_error()).with_context(|| format!("lock {} in memory", path.display()));
+        return Err(io::Error::last_os_error())
+            .with_context(|| format!("lock {} in memory", path.display()));
     }
     Ok(())
 }
@@ -438,9 +681,14 @@ pub fn registered(name: &str) -> bool {
 /// directory its kind uses. It is named as the interface and then which of
 /// them it is.
 pub fn registered_hardware(name: &str) -> bool {
-    let Some((interface, instance)) = name.rsplit_once('/') else { return false };
+    let Some((interface, instance)) = name.rsplit_once('/') else {
+        return false;
+    };
     match skyward_binder::driver::Binder::hardware() {
-        Ok(binder) => matches!(skyward_binder::hidl::find(&binder, interface, instance), Ok(Some(_))),
+        Ok(binder) => matches!(
+            skyward_binder::hidl::find(&binder, interface, instance),
+            Ok(Some(_))
+        ),
         Err(_) => false,
     }
 }
@@ -474,7 +722,11 @@ fn wait_for(pid: u32) -> Result<()> {
         return Err(e).context("open a pidfd");
     }
     let fd = unsafe { OwnedFd::from_raw_fd(fd as i32) };
-    let mut pfd = libc::pollfd { fd: fd.as_raw_fd(), events: libc::POLLIN, revents: 0 };
+    let mut pfd = libc::pollfd {
+        fd: fd.as_raw_fd(),
+        events: libc::POLLIN,
+        revents: 0,
+    };
     loop {
         if unsafe { libc::poll(&mut pfd, 1, -1) } >= 0 {
             return Ok(());
@@ -483,30 +735,5 @@ fn wait_for(pid: u32) -> Result<()> {
         if e.kind() != io::ErrorKind::Interrupted {
             return Err(e).context("wait on the pidfd");
         }
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::hand_over;
-    use std::os::fd::AsRawFd;
-    use std::os::unix::process::CommandExt;
-
-    /// The listener a program is given has to be open in the program: the
-    /// recovery duplicates it close-on-exec so that nothing else gets it, and
-    /// the child clears that for its own exec alone. Without the clearing the
-    /// number the environment names is closed by the time the program looks
-    /// for it, which is how a secure-world daemon ends at once and is started
-    /// again every few seconds.
-    #[test]
-    fn the_listener_a_program_is_given_is_open_in_it() {
-        let file = std::fs::File::open("/dev/null").expect("open /dev/null");
-        let fd = unsafe { libc::fcntl(file.as_raw_fd(), libc::F_DUPFD_CLOEXEC, 50) };
-        assert!(fd >= 50, "the copy is at or above 50, where the environment names it");
-        let mut cmd = std::process::Command::new("sh");
-        cmd.arg("-c").arg(format!("test -e /proc/self/fd/{fd}"));
-        unsafe { cmd.pre_exec(move || hand_over(&[fd])) };
-        let status = cmd.status().expect("run sh");
-        assert!(status.success(), "the program finds the descriptor it was handed");
     }
 }

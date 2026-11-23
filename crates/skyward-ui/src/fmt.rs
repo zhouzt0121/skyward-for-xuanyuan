@@ -905,7 +905,7 @@ pub fn file_line(l: Lang, f: &FileRow, now: i64, zone: usize) -> String {
 
 /// The parts a backup holds: `启动分区、系统分区`.
 pub fn parts(l: Lang, held: &[bool; 4]) -> String {
-    list(l, BACKUP_PARTS.iter().zip(held).filter(|(_, &on)| on).map(|(name, _)| l.pick(*name)))
+    list(l, BACKUP_PARTS.iter().zip(held).filter(|&(_, &on)| on).map(|(name, _)| l.pick(*name)))
 }
 
 /// What an image is, and what it holds.
@@ -932,14 +932,14 @@ pub fn image_kind(l: Lang, kind: ImageKind) -> (&'static str, &'static str) {
         ImageKind::Super { sparse: true } => {
             (["super 镜像", "super 映像檔", "super image"], ["sparse 格式，包含两个槽位的全部逻辑分区", "sparse 格式，包含兩個槽位的全部邏輯分割區", "Sparse, holds every logical partition of both slots"])
         }
+        ImageKind::Super { sparse: false } => {
+            (["super 镜像", "super 映像檔", "super image"], ["原始格式，包含两个槽位的全部逻辑分区", "原始格式，包含兩個槽位的全部邏輯分割區", "Raw, holds every logical partition of both slots"])
+        }
         ImageKind::Logical { sparse: true } => {
             (["逻辑分区镜像", "邏輯分割區映像檔", "Logical partition image"], ["sparse 格式，刷入 super 中所选槽位的分区", "sparse 格式，刷入 super 中所選槽位的分割區", "Sparse, goes to a partition of the chosen slots in super"])
         }
         ImageKind::Logical { sparse: false } => {
             (["逻辑分区镜像", "邏輯分割區映像檔", "Logical partition image"], ["原始格式，刷入 super 中所选槽位的分区", "原始格式，刷入 super 中所選槽位的分割區", "Raw, goes to a partition of the chosen slots in super"])
-        }
-        ImageKind::Super { sparse: false } => {
-            (["super 镜像", "super 映像檔", "super image"], ["原始格式，包含两个槽位的全部逻辑分区", "原始格式，包含兩個槽位的全部邏輯分割區", "Raw, holds every logical partition of both slots"])
         }
     };
     (l.pick(name), l.pick(holds))
@@ -956,7 +956,7 @@ pub fn partition_role(l: Lang, name: &str) -> &'static str {
         "vbmeta" => ["启动验证数据", "啟動驗證資料", "Verified boot data"],
         "vbmeta_system" => ["系统分区的验证数据", "系統分割區的驗證資料", "Verification data of the system partitions"],
         "vbmeta_vendor" => ["厂商分区的验证数据", "廠商分割區的驗證資料", "Verification data of the vendor partitions"],
-        "super" => ["全部逻辑分区（不分槽位）", "全部邏輯分割區（不分槽位）", "Every logical partition (no slots)"],
+        "super" => ["动态分区", "動態分割區", "Dynamic partitions"],
         _ => ["分区", "分割區", "Partition"],
     })
 }

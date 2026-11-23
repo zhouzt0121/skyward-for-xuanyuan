@@ -15,27 +15,42 @@ os_version_prop = "ro.mi.os.version.incremental"
 width = 1440
 height = 3200
 density = 600
+diagonal = 6.73
 
 [modules]
 sources = ["vendor_boot", "vendor_dlkm", "vendor", "system_dlkm"]
-# The touchscreen: Synaptics TouchComm over SPI behind Xiaomi's touch
-# layer, the one touch driver the phone's own modules.load lists.
+# The touchscreen: Synaptics TouchComm over SPI behind Xiaomi's touch layer.
+# The secure element: ST's ST54L, whose stm_st54se_gpio makes the node the
+# element's HAL opens, with stm_nfc_i2c beside it. The kernel driver hands
+# those nodes out under its own thread, so the recovery waits for each one
+# before it starts the programs that use them.
 load = ["synaptics_tcm2", "stm_st54se_gpio", "stm_nfc_i2c"]
 
-# As on the 17 Ultra, no init script of the phone's starts touch_report:
-# the touch feature service turns the controller's raw frames into
-# touches with /odm/lib64/libtouchreport.so, and a recovery runs none of
-# it. Told through Xiaomi's touch layer, the driver has the controller
-# report positions itself; that is known of the 17 Ultra's Synaptics
-# controller and not yet tried on this phone's.
+# The secure element's node is left as its driver makes it: root's. The
+# credential service, the element's HAL and the weaver are run as root by
+# `skyward-programs`, as YARP and the tested xuanyuan build run them, so no
+# `[[owners]]` entry is needed to hand the node over. A hand-over that fails
+# would stop the whole key start, which is worse than leaving a node root
+# alone may open anyway.
+
+# As on the 17 Ultra, no init script of the phone's starts touch_report: the
+# touch feature service turns the controller's raw frames into touches with
+# /odm/lib64/libtouchreport.so, and a recovery runs none of it. Told through
+# Xiaomi's touch layer, the driver has the controller report positions
+# itself.
 [touch]
 writes = [{ path = "/sys/class/touch/touch_dev/enable_touch_raw", value = "0" }]
-# Two taps on the dark panel light it, as on haotian (user asked, 2026-11-09).
-# The controller sleeps unless Touch_Doubletap_Mode is set through
-# /dev/xiaomi-touch (done at panel bring-up); its taps arrive as KEY_WAKEUP.
+# Two taps on the dark panel light it, as the phone's own system does. The
+# controller keeps reporting fingers while the panel is off, so the taps
+# arrive. This only says the panel *can*: the gesture is a switch on the
+# settings page and ships off, because it costs the phone its suspend.
 double_tap = true
 
-# Decryption for the ColorOS 17 port (PMA120), v2.
+# The modem partition holds the firmware the kernel's loader asks for — the
+# ADSP's and the radios' — and is shown at /firmware for it. The secure
+# element's HAL cannot open the TA until the DSP is running, and the weaver
+# behind the lock screen's secret goes with it, so this sits on the
+# decryption path and not only on the radios'.
 [firmware]
 partition = "modem"
 
@@ -46,12 +61,9 @@ mounted = ["persist"]
 libraries = ["/mnt/system/system/lib64/libsysutils.so", "/mnt/system/system/lib64/libcap.so"]
 
 # What the phone's own init runs once the system has finished starting, as
-# kernel-post-boot in /vendor/etc/init/hw/init.qti.kernel.rc. The kernel
-# starts the CPU clusters on the performance governor, which holds them at
-# their highest clock; the script hands them to WALT, lets idle CPUs power
-# down and sets how the memory bus scales. Without it the CPUs stay at
-# their highest clock and voltage even while idle, and the phone slowly
-# heats up.
+# kernel-post-boot in /vendor/etc/init/hw/init.qti.kernel.rc. Without it the
+# CPUs stay at their highest clock and voltage even while idle, and the phone
+# slowly heats up.
 [[service]]
 path = "/vendor/bin/sh"
 args = ["/vendor/bin/init.kernel.post_boot.sh"]
@@ -60,106 +72,24 @@ oneshot = true
 user = "root"
 groups = ["root", "system", "wakelock", "graphics"]
 
-# Decrypt chain, after Rinrroy/skyward-for-haotian v0.2.2 (same SM8750 vendor
-# family, tested there). Needs that fork's recovery binary, which supports
-# `sockets`. A program missing from this vendor is skipped. Thales weaver /
-# OMAPI / eSE are left out: on the ColorOS port the weaver HAL is not running.
-[[service]]
-path = "/vendor/bin/qseecomd"
-libraries = ["/system/lib64", "/vendor/lib64"]
-ready_property = "vendor.sys.listeners.registered"
-sockets = [{ name = "notify-topology", kind = "stream", mode = 0o660, user = "system", group = "drmrpc" }]
-user = "root"
-groups = ["root", "drmrpc"]
+# The key chain itself is not listed here. Skyward 0.3.1 reads the installed
+# system's own init scripts and VINTF descriptions and starts qseecomd,
+# ssgtzd, hlosminkdaemon, keymint, gatekeeper, secure_element, weaver and the
+# boot control in the order the phone's own init does. That is also what
+# keeps a second weaver description out of the recovery's manifest: the
+# installed odm already describes it, and a duplicate makes servicemanager
+# drop the whole manifest.
 
-[[service]]
-path = "/vendor/bin/ssgtzd"
-libraries = ["/system/lib64", "/vendor/lib64"]
-sockets = [
-    { name = "ssgtzd", kind = "stream", mode = 0o660, user = "system", group = "oem_2912" },
-    { name = "ssgtzd_opener", kind = "stream", mode = 0o660, user = "system", group = "system" },
-]
-user = "system"
-groups = ["system", "oem_2912", "wakelock"]
-capabilities = ["WAKE_ALARM", "BLOCK_SUSPEND"]
-
-[[service]]
-path = "/vendor/bin/hlosminkdaemon"
-libraries = ["/system/lib64", "/vendor/lib64"]
-sockets = [{ name = "hlos_mink_opener", kind = "stream", mode = 0o660, user = "system", group = "system" }]
-user = "system"
-groups = ["system"]
-capabilities = ["WAKE_ALARM", "BLOCK_SUSPEND"]
-
-[[service]]
-path = "/vendor/bin/hw/android.hardware.security.keymint-service-qti"
-libraries = ["/system/lib64", "/vendor/lib64"]
-ready_service = "android.hardware.security.keymint.IKeyMintDevice/default"
-registers = [
-    "android.hardware.security.keymint.IRemotelyProvisionedComponent/default",
-    "android.hardware.security.secureclock.ISecureClock/default",
-    "android.hardware.security.sharedsecret.ISharedSecret/default",
-]
-user = "system"
-groups = ["system", "drmrpc"]
-
-[[service]]
-path = "/vendor/bin/hw/android.hardware.gatekeeper-service-qti"
-libraries = ["/system/lib64", "/vendor/lib64", "/vendor/lib64/hw"]
-ready_service = "android.hardware.gatekeeper.IGatekeeper/default"
-user = "root"
-groups = ["system"]
-
-# eSE chain for the Thales weaver (ST54L), after the haotian fork. The PIN's
-# protector on HyperOS data is weaver-bound (spblob *.weaver, slot 1).
-[[service]]
-path = "/vendor/bin/hw/android.hardware.secure_element-service.qti"
-libraries = ["/system/lib64", "/vendor/lib64", "/vendor/lib64/hw"]
-ready_service = "android.hardware.secure_element.ISecureElement/eSE1"
-registers = [
-    "android.hardware.secure_element.ISecureElement/SIM1",
-    "android.hardware.secure_element.ISecureElement/SIM2",
-]
-user = "root"
-groups = ["root", "nfc"]
-
-[[service]]
-path = "/system/bin/se_omapi"
-libraries = ["/system/lib64", "/vendor/lib64"]
-ready_service = "android.se.omapi.ISecureElementService/default"
-user = "root"
-groups = ["root", "system"]
-
-# Run as root rather than vendor_thales_weaver: an account name the recovery
-# cannot resolve would stop every service after it.
-[[service]]
-path = "/odm/bin/hw/android.hardware.weaver-service.thales"
-libraries = ["/system/lib64", "/vendor/lib64", "/odm/lib64"]
-ready_service = "android.hardware.weaver.IWeaver/default"
-user = "root"
-groups = ["root", "system", "drmrpc"]
-
-[[service]]
-path = "/vendor/bin/hw/android.hardware.boot-service.qti"
-libraries = ["/system/lib64", "/vendor/lib64"]
-ready_service = "android.hardware.boot.IBootControl/default"
-user = "root"
-groups = ["root"]
-
-# WLAN: the peach node in the device tree, which either of the two Peach
-# drivers the phone's own modules.load lists and its modules.blocklist
-# leaves may drive, by the chip's revision; the phone loads both, and so do
-# these. Their cfg80211 asks for rfkill, one of the kernel's own modules in
-# system_dlkm, as the 17 Ultra's does. Its recovery covers the vendor
-# partition's firmware folder with the modem's, as the 13 Ultra's does, so
-# the settings and the MAC address are given to the loader again, under
-# the names each driver asks for: the settings from the vendor partition,
-# the address from where the vendor's links point in persist.
-# wpa_supplicant runs on the recovery's own libraries before the vendor
-# partition's, as on the 17 Ultra.
+# WLAN: the peach node in the device tree, driven by qca_cld3_peach_v2, the
+# one of the two Peach drivers this build loads. Its cfg80211 asks for
+# rfkill, one of the kernel's own modules in system_dlkm. Its recovery covers
+# the vendor partition's firmware folder with the modem's, as the 13 Ultra's
+# does, so the settings and the MAC address are given to the loader again,
+# under the names each driver asks for.
 [wlan]
 modules = ["rfkill", "qca_cld3_peach_v2"]
 writes = [{ path = "/sys/bus/platform/devices/b0000000.qcom,cnss-peach/fs_ready", value = "1" }]
+release = [{ path = "/sys/bus/platform/devices/b0000000.qcom,cnss-peach/fs_ready", value = "0" }]
 firmware = [
     { name = "wlan/qca_cld/peach/WCNSS_qcom_cfg.ini", path = "/vendor/etc/wifi/peach/WCNSS_qcom_cfg.ini" },
     { name = "wlan/qca_cld/peach/wlan_mac.bin", partition = "persist", path = "wlan/wlan_mac.bin" },
@@ -176,18 +106,18 @@ probe = "http://connect.rom.miui.com/generate_204"
 [update]
 server = "https://update.miui.com/updates/miotaV3.php"
 
-# The stock build the recovery is made on: the Chinese system's
-# OS4.0.0.18, whose full update package on the phone maker's own download
-# server holds the recovery partition the recovery is built on top of.
+# The stock build the recovery is made on: the Chinese system's OS4.0.4.0,
+# whose full update package on the phone maker's own download server holds
+# the recovery partition the recovery is built on top of. The hash is read
+# from the package's own payload manifest.
 [stock]
-version = "OS4.0.0.18.XOACNXM"
-package = "https://bkt-sgp-miui-ota-update-alisgp.oss-ap-southeast-1.aliyuncs.com/OS4.0.0.18.XOACNXM/xuanyuan-ota_full-OS4.0.0.18.XOACNXM-user-17.0-bfc6faa7f2.zip"
-recovery = "29128f33b29242bc947d23ae0e883c3030ad07666bd714f693d906553b93d0ba"
+version = "OS4.0.4.0.XOACNXM"
+package = "https://bkt-sgp-miui-ota-update-alisgp.oss-ap-southeast-1.aliyuncs.com/OS4.0.4.0.XOACNXM/xuanyuan-ota_full-OS4.0.4.0.XOACNXM-user-17.0-a05ed5a444.zip"
+recovery = "55f491052a360bc15362fd80c8bd2dd0912b289e1653f2bd7f9c5a12e7fea27b"
 
 # qcom-hv-haptics (qcom,hv-haptics in its dtbo), whose driver says the
 # motor's resonant frequency as the 17 Ultra's does; the click is made from
-# samples at that frequency, and the strengths are the 17 Ultra's. Neither
-# is yet tried on this phone's motor.
+# samples at that frequency.
 [haptics]
 resonance = "/sys/class/qcom-haptics/lra_frequency_hz"
 strength = { lightest = 0.25, strongest = 0.75 }

@@ -4,6 +4,7 @@
 //! what it opens holds every file, with the names and contents of the ones
 //! that are a user's own still encrypted.
 
+use crate::encryption::{Encryption, key_dir, target};
 use crate::gatekeeper::Gatekeeper;
 use crate::keymint::KeyMint;
 use crate::keystore::{StoredKey, Unwrap};
@@ -12,7 +13,6 @@ use crate::user::Bound;
 use crate::weaver::Weaver;
 use anyhow::{Context, Result};
 use skyward_binder::driver::Binder;
-use skyward_block::dm::Target;
 use skyward_block::fsck::Checked;
 use skyward_block::fstab::Entry;
 use skyward_block::{dm, mount};
@@ -32,43 +32,6 @@ pub const SDCARD: &str = "/sdcard";
 /// The phone's owner, the first of its users.
 const OWNER: u32 = 0;
 
-/// The key is in a directory of this name under the one the phone names.
-const KEY_DIR: &str = "key";
-
-/// How the kernel knows the cipher a phone names.
-const CIPHERS: [(&str, &str); 2] = [("aes-256-xts", "aes-xts-plain64"), ("adiantum", "xchacha12,aes-adiantum-plain64")];
-
-/// The hardware reads and writes in 4096-byte units, so the partition is
-/// mapped in whole multiples of eight 512-byte sectors.
-const SECTORS_PER_UNIT: u64 = 8;
-
-/// How a phone says its data partition is encrypted: the cipher, and
-/// whether the key is one only the storage hardware can unwrap.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct Encryption {
-    pub cipher: String,
-    pub wrapped: bool,
-}
-
-impl Encryption {
-    /// Read what an entry of the phone's own table says.
-    pub fn of(entry: &Entry) -> Result<Encryption> {
-        let said = entry.extra("metadata_encryption").context("the phone says its data partition is not encrypted whole")?;
-        let (name, rest) = said.split_once(':').unwrap_or((said, ""));
-        let cipher = CIPHERS
-            .iter()
-            .find_map(|(theirs, kernels)| (*theirs == name).then_some(*kernels))
-            .with_context(|| format!("no cipher here is the {name} the phone names"))?;
-        Ok(Encryption { cipher: cipher.to_string(), wrapped: rest == "wrappedkey_v0" })
-    }
-}
-
-/// Where the phone keeps the key for the filesystem an entry describes.
-pub fn key_dir(entry: &Entry) -> Result<PathBuf> {
-    let dir = entry.extra("keydirectory").context("the phone says where the key for its data partition is not")?;
-    Ok(Path::new(dir).join(KEY_DIR))
-}
-
 /// Unwrap the key the phone keeps for its data partition and give the
 /// storage hardware the form of it that lasts until the phone is started
 /// again.
@@ -80,10 +43,15 @@ pub fn storage_key(service: &KeyMint, entry: &Entry, encryption: &Encryption) ->
 /// this start of the phone. A key the hardware holds never appears as
 /// itself: what comes back is wrapped again, for this start only.
 fn hardware_key(service: &KeyMint, dir: &Path, wrapped: bool) -> Result<Vec<u8>> {
-    let stored = StoredKey::load(dir).with_context(|| format!("read the key in {}", dir.display()))?;
-    let key = stored.unwrap(Unwrap::Hardware(service)).with_context(|| format!("unwrap the key in {}", dir.display()))?;
+    let stored =
+        StoredKey::load(dir).with_context(|| format!("read the key in {}", dir.display()))?;
+    let key = stored
+        .unwrap(Unwrap::Hardware(service))
+        .with_context(|| format!("unwrap the key in {}", dir.display()))?;
     match wrapped {
-        true => service.ephemeral_storage_key(&key).with_context(|| format!("make the key in {} usable now", dir.display())),
+        true => service
+            .ephemeral_storage_key(&key)
+            .with_context(|| format!("make the key in {} usable now", dir.display())),
         false => Ok(key),
     }
 }
@@ -110,7 +78,10 @@ fn open(service: &KeyMint) -> Result<Opened> {
         // A phone that names the partition once per filesystem it might
         // hold mounts it with the entry of the one it holds.
         let holds = skyward_block::probe::filesystem(&mapped)?;
-        let entry = entries.iter().find(|e| holds.as_ref() == Some(&e.filesystem)).unwrap_or(&entries[0]);
+        let entry = entries
+            .iter()
+            .find(|e| holds.as_ref() == Some(&e.filesystem))
+            .unwrap_or(&entries[0]);
         let checked = match entry.extras.iter().any(|e| e == "check") {
             true => Some(skyward_block::fsck::check(&mapped, &entry.filesystem)?),
             false => None,
@@ -120,7 +91,11 @@ fn open(service: &KeyMint) -> Result<Opened> {
         Ok((checked, entry.filesystem.clone()))
     })();
     match mounted {
-        Ok((checked, filesystem)) => Ok(Opened { mapped, filesystem, checked }),
+        Ok((checked, filesystem)) => Ok(Opened {
+            mapped,
+            filesystem,
+            checked,
+        }),
         Err(e) => match dm::remove(MAPPED) {
             Ok(()) => Err(e),
             Err(r) => Err(e.context(format!("removing {MAPPED} afterwards failed too: {r:#}"))),
@@ -133,12 +108,18 @@ fn open(service: &KeyMint) -> Result<Opened> {
 /// and the device the filesystem is read and written through.
 fn map(service: &KeyMint) -> Result<(Vec<Entry>, PathBuf)> {
     let entries = skyward_block::fstab::read(MOUNT)?;
-    let entry = entries.first().with_context(|| format!("the phone's own table says nothing about {MOUNT}"))?;
+    let entry = entries
+        .first()
+        .with_context(|| format!("the phone's own table says nothing about {MOUNT}"))?;
     let encryption = Encryption::of(entry)?;
     let device = skyward_block::fstab::device(entry)?;
     let key = storage_key(service, entry, &encryption)?;
     let sectors = skyward_block::size_bytes(&device)? / 512;
-    let mapped = dm::create(MAPPED, &[target(&device, sectors, &key, &encryption)], false)?;
+    let mapped = dm::create(
+        MAPPED,
+        &[target(&device, sectors, &key, &encryption)],
+        false,
+    )?;
     Ok((entries, mapped))
 }
 
@@ -213,25 +194,48 @@ pub fn open_without_credential(service: &KeyMint) -> Result<Opening> {
     let mut closed = Vec::new();
     let mut owner = Note::default();
     for user in open_users(service)? {
+        // Read once and given to the opening below, which used to read it
+        // again for itself: it is the same files, read in the same job, and
+        // nothing writes them while the phone is in a recovery, so the
+        // second read could only give back the same value or the same
+        // failure at the same point.
         let protector = protector(user)?;
-        match protector.lock {
+        match &protector.lock {
             None => {
-                let note = open_user_files(service, user, None, None)?;
+                let note = open_user_files(service, user, &protector, None, None)?;
                 if user == OWNER {
                     owner = note;
                 }
             }
-            Some(lock) => closed.push(Closed { user, lock: lock.kind, made_up: made_up(user, &protector.id), why: None }),
+            Some(lock) => closed.push(Closed {
+                user,
+                lock: lock.kind,
+                made_up: made_up(user, &protector.id),
+                why: None,
+            }),
         }
     }
-    Ok(Opening { mounted, closed: open_made_up(service, closed, &owner) })
+    Ok(Opening {
+        mounted,
+        closed: open_made_up(service, closed, &owner),
+    })
 }
 
 /// Open the own files of `user` with what they typed at their screen lock
 /// and, where `user` is the owner, of each of `closed` whose credential
 /// the phone made up behind theirs; give those still closed.
-pub fn unlock(service: &KeyMint, closed: &[Closed], user: u32, credential: &[u8]) -> Result<Vec<Closed>> {
-    let note = open_user_files(service, user, Some(credential), None)?;
+pub fn unlock(
+    service: &KeyMint,
+    closed: &[Closed],
+    user: u32,
+    credential: &[u8],
+) -> Result<Vec<Closed>> {
+    // Read here, which is where the opening read it before: what the phone
+    // keeps of the user's secret is read once for the opening that used to
+    // read it for itself, and a second read in the same job could only give
+    // back the same value or the same failure at the same point.
+    let protector = protector(user)?;
+    let note = open_user_files(service, user, &protector, Some(credential), None)?;
     let rest = closed.iter().filter(|c| c.user != user).cloned().collect();
     Ok(match user == OWNER {
         true => open_made_up(service, rest, &note),
@@ -248,7 +252,10 @@ fn open_made_up(service: &KeyMint, closed: Vec<Closed>, owner: &Note) -> Vec<Clo
         return closed
             .into_iter()
             .map(|c| match c.made_up {
-                true => Closed { why: owner.refused.clone(), ..c },
+                true => Closed {
+                    why: owner.refused.clone(),
+                    ..c
+                },
                 false => c,
             })
             .collect();
@@ -257,9 +264,17 @@ fn open_made_up(service: &KeyMint, closed: Vec<Closed>, owner: &Note) -> Vec<Clo
         .into_iter()
         .filter_map(|c| match c.made_up {
             false => Some(c),
-            true => match open_user_files(service, c.user, None, Some(token)) {
+            // What the phone keeps of this user's secret is read here, as it
+            // was when the opening read it for itself: these users were not
+            // read for in the loop above, so this is the one read they get.
+            true => match protector(c.user).and_then(|protector| {
+                open_user_files(service, c.user, &protector, None, Some(token))
+            }) {
                 Ok(_) => None,
-                Err(e) => Some(Closed { why: Some(format!("{e:#}")), ..c }),
+                Err(e) => Some(Closed {
+                    why: Some(format!("{e:#}")),
+                    ..c
+                }),
             },
         })
         .collect()
@@ -299,8 +314,16 @@ fn users() -> Result<Vec<u32>> {
     let dir = Path::new(USER_KEYS).join("de");
     let mut users = Vec::new();
     for entry in std::fs::read_dir(&dir).with_context(|| format!("read {}", dir.display()))? {
-        let path = entry.with_context(|| format!("read {}", dir.display()))?.path();
-        let Some(user) = path.file_name().and_then(|n| n.to_str()).and_then(|n| n.parse::<u32>().ok()) else { continue };
+        let path = entry
+            .with_context(|| format!("read {}", dir.display()))?
+            .path();
+        let Some(user) = path
+            .file_name()
+            .and_then(|n| n.to_str())
+            .and_then(|n| n.parse::<u32>().ok())
+        else {
+            continue;
+        };
         users.push(user);
     }
     users.sort_unstable();
@@ -336,14 +359,19 @@ fn protector(user: u32) -> Result<crate::user::Protector> {
     let dir = blobs(user);
     let mut ids = Vec::new();
     for entry in std::fs::read_dir(&dir).with_context(|| format!("read {}", dir.display()))? {
-        let path = entry.with_context(|| format!("read {}", dir.display()))?.path();
-        if path.extension().is_some_and(|e| e == "spblob") {
-            if let Some(id) = path.file_stem().and_then(|s| s.to_str()) {
-                ids.push(id.to_string());
-            }
+        let path = entry
+            .with_context(|| format!("read {}", dir.display()))?
+            .path();
+        if path.extension().is_some_and(|e| e == "spblob")
+            && let Some(id) = path.file_stem().and_then(|s| s.to_str())
+        {
+            ids.push(id.to_string());
         }
     }
-    let id = match crate::locksettings::current_protector(Path::new(crate::locksettings::DATABASE), user)? {
+    let id = match crate::locksettings::current_protector(
+        Path::new(crate::locksettings::DATABASE),
+        user,
+    )? {
         Some(recorded) => {
             anyhow::ensure!(
                 ids.contains(&recorded),
@@ -385,13 +413,17 @@ fn protector(user: u32) -> Result<crate::user::Protector> {
     // other keeps the bytes the blob is bound to beside it.
     let slot = dir.join(format!("{id}.weaver"));
     let bound = match slot.exists() {
-        true => Bound::Weaver(crate::user::weaver_slot(&std::fs::read(&slot).with_context(|| format!("read {}", slot.display()))?)?),
+        true => Bound::Weaver(crate::user::weaver_slot(
+            &std::fs::read(&slot).with_context(|| format!("read {}", slot.display()))?,
+        )?),
         false => Bound::Secdiscardable(
-            std::fs::read(dir.join(format!("{id}.secdis"))).with_context(|| format!("read what the blob in {} is bound to", dir.display()))?,
+            std::fs::read(dir.join(format!("{id}.secdis")))
+                .with_context(|| format!("read what the blob in {} is bound to", dir.display()))?,
         ),
     };
     Ok(crate::user::Protector {
-        blob: std::fs::read(dir.join(format!("{id}.spblob"))).with_context(|| format!("read the blob in {}", dir.display()))?,
+        blob: std::fs::read(dir.join(format!("{id}.spblob")))
+            .with_context(|| format!("read the blob in {}", dir.display()))?,
         bound,
         id,
         lock,
@@ -439,7 +471,9 @@ fn made_up_record(user: u32, id: &str) -> Option<(PathBuf, String)> {
         return Some((android, format!("{MADE_UP_KEY}{user}")));
     }
     let hyperos = blobs(user).join(format!("{id}.{MADE_UP_BESIDE_BLOB}"));
-    hyperos.is_file().then(|| (hyperos, format!("{MADE_UP_KEY}{user}.{id}")))
+    hyperos
+        .is_file()
+        .then(|| (hyperos, format!("{MADE_UP_KEY}{user}.{id}")))
 }
 
 /// The credential a phone made up for `user`, whose protector is `id`,
@@ -448,11 +482,22 @@ fn made_up_record(user: u32, id: &str) -> Option<(PathBuf, String)> {
 /// nobody ever types their credential, so the phone writes one down for
 /// itself and keeps it behind the owner's. `owner` is the note the owner's
 /// credential gave.
-fn made_up_credential(service: &KeyMint, user: u32, id: &str, owner: Option<&Token>) -> Result<Option<Vec<u8>>> {
-    let Some((file, alias)) = made_up_record(user, id) else { return Ok(None) };
+fn made_up_credential(
+    service: &KeyMint,
+    user: u32,
+    id: &str,
+    owner: Option<&Token>,
+) -> Result<Option<Vec<u8>>> {
+    let Some((file, alias)) = made_up_record(user, id) else {
+        return Ok(None);
+    };
     let stored = std::fs::read(&file).with_context(|| format!("read {}", file.display()))?;
     if stored.len() < NONCE_BYTES + TAG_BYTES {
-        anyhow::bail!("{} is {} bytes, too few to hold a credential", file.display(), stored.len());
+        anyhow::bail!(
+            "{} is {} bytes, too few to hold a credential",
+            file.display(),
+            stored.len()
+        );
     }
     let (nonce, body) = stored.split_at(NONCE_BYTES);
     let held = crate::keystore2::key_blob(Path::new(crate::keystore2::DATABASE), &alias)?;
@@ -469,13 +514,22 @@ const TAG_BYTES: usize = 16;
 
 /// Let in the key for a user's own files, and give the note the secure
 /// world wrote for the secret behind their credential, which is what the
-/// keys the phone keeps for them are guarded by. `credential` is what the
+/// keys the phone keeps for them are guarded by. `protector` is what the
+/// phone keeps of that user's secret, which the caller reads and hands in:
+/// every caller has just read it, and a second read of the same files in
+/// the same job could only give back the same value or the same failure at
+/// the same point, so the opening reads it once. `credential` is what the
 /// user would type at their screen lock; a user who has set none needs
 /// none, and a user the phone made one up for needs `owner`, the note the
 /// owner's own secret gave. The owner's files open, their shared storage
 /// shows at /sdcard.
-fn open_user_files(service: &KeyMint, user: u32, credential: Option<&[u8]>, owner: Option<&Token>) -> Result<Note> {
-    let protector = protector(user)?;
+fn open_user_files(
+    service: &KeyMint,
+    user: u32,
+    protector: &crate::user::Protector,
+    credential: Option<&[u8]>,
+    owner: Option<&Token>,
+) -> Result<Note> {
     let stretched = match &protector.lock {
         Some(lock) => {
             let typed = match made_up_credential(service, user, &protector.id, owner)? {
@@ -506,7 +560,10 @@ fn open_user_files(service: &KeyMint, user: u32, credential: Option<&[u8]>, owne
             )?;
             let key = crate::user::weaver_key(&stretched, config.key_bytes)?;
             let value = weaver.read(*slot, &key)?;
-            (crate::user::weaver_protector_secret(&stretched, &value), None)
+            (
+                crate::user::weaver_protector_secret(&stretched, &value),
+                None,
+            )
         }
         // The key holding this user's secret is guarded by the screen lock,
         // so the secure world has to be shown the credential itself before
@@ -518,11 +575,20 @@ fn open_user_files(service: &KeyMint, user: u32, credential: Option<&[u8]>, owne
                 &lock.enrolled,
                 &crate::user::gatekeeper_password(&stretched),
             )?;
-            (crate::user::protector_secret(&stretched, secdiscardable), Some(note))
+            (
+                crate::user::protector_secret(&stretched, secdiscardable),
+                Some(note),
+            )
         }
-        (Bound::Secdiscardable(secdiscardable), None) => (crate::user::protector_secret(&stretched, secdiscardable), None),
+        (Bound::Secdiscardable(secdiscardable), None) => (
+            crate::user::protector_secret(&stretched, secdiscardable),
+            None,
+        ),
     };
-    let held = crate::keystore2::key_blob(Path::new(crate::keystore2::DATABASE), &protector.key_alias())?;
+    let held = crate::keystore2::key_blob(
+        Path::new(crate::keystore2::DATABASE),
+        &protector.key_alias(),
+    )?;
     let content = crate::user::content(&protector.blob)?;
     if content.len() < NONCE_BYTES + TAG_BYTES {
         anyhow::bail!("the user's blob is too short to hold anything");
@@ -536,11 +602,19 @@ fn open_user_files(service: &KeyMint, user: u32, credential: Option<&[u8]>, owne
 
     let mode = std::fs::read_to_string(FILE_MODE).with_context(|| format!("read {FILE_MODE}"))?;
     let wrapped = crate::fscrypt::hardware_wrapped(mode.trim());
-    let dir = Path::new(USER_KEYS).join("ce").join(user.to_string()).join("current");
-    let stored = StoredKey::load(&dir).with_context(|| format!("read the key in {}", dir.display()))?;
-    let raw = stored.unwrap(Unwrap::<KeyMint>::Secret(&file_secret)).with_context(|| format!("unwrap the key in {}", dir.display()))?;
+    let dir = Path::new(USER_KEYS)
+        .join("ce")
+        .join(user.to_string())
+        .join("current");
+    let stored =
+        StoredKey::load(&dir).with_context(|| format!("read the key in {}", dir.display()))?;
+    let raw = stored
+        .unwrap(Unwrap::<KeyMint>::Secret(&file_secret))
+        .with_context(|| format!("unwrap the key in {}", dir.display()))?;
     let raw = match wrapped {
-        true => service.ephemeral_storage_key(&raw).with_context(|| format!("make the key in {} usable now", dir.display()))?,
+        true => service
+            .ephemeral_storage_key(&raw)
+            .with_context(|| format!("make the key in {} usable now", dir.display()))?,
         false => raw,
     };
     crate::fscrypt::add_key(Path::new(MOUNT), &raw, wrapped)?;
@@ -574,69 +648,17 @@ fn secret_note(user: u32, synthetic_password: &[u8]) -> Result<Note> {
     let password = crate::user::secret_gatekeeper_password(synthetic_password);
     let asked = Gatekeeper::open(&binder, &hardware)
         .and_then(|gatekeeper| gatekeeper.verify(user, &enrolled, &password))
-        .with_context(|| format!("have the secure world check the secret behind user {user}'s credential"));
+        .with_context(|| {
+            format!("have the secure world check the secret behind user {user}'s credential")
+        });
     Ok(match asked {
-        Ok(token) => Note { token: Some(token), refused: None },
-        Err(e) => Note { token: None, refused: Some(format!("{e:#}")) },
+        Ok(token) => Note {
+            token: Some(token),
+            refused: None,
+        },
+        Err(e) => Note {
+            token: None,
+            refused: Some(format!("{e:#}")),
+        },
     })
-}
-
-/// Build the device-mapper target that reads the partition through the
-/// storage hardware's decryption.
-pub fn target(device: &str, sectors: u64, key: &[u8], encryption: &Encryption) -> Target {
-    Target::DefaultKey {
-        sectors: sectors - sectors % SECTORS_PER_UNIT,
-        device: device.to_string(),
-        cipher: encryption.cipher.clone(),
-        key: key.iter().map(|b| format!("{b:02x}")).collect(),
-        wrapped: encryption.wrapped,
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    fn entry(extras: &str) -> Entry {
-        Entry {
-            device: "/dev/block/bootdevice/by-name/userdata".into(),
-            mount_point: MOUNT.into(),
-            filesystem: "f2fs".into(),
-            options: vec!["noatime".into(), "inlinecrypt".into()],
-            extras: extras.split(',').map(str::to_string).collect(),
-        }
-    }
-
-    #[test]
-    fn the_phones_own_words_for_the_cipher_become_the_kernels() {
-        let e = entry("metadata_encryption=aes-256-xts:wrappedkey_v0,keydirectory=/metadata/vold/metadata_encryption");
-        assert_eq!(Encryption::of(&e).unwrap(), Encryption { cipher: "aes-xts-plain64".into(), wrapped: true });
-        let plain = entry("metadata_encryption=adiantum");
-        assert_eq!(Encryption::of(&plain).unwrap(), Encryption { cipher: "xchacha12,aes-adiantum-plain64".into(), wrapped: false });
-    }
-
-    #[test]
-    fn a_cipher_or_a_key_the_phone_does_not_name_is_an_error() {
-        assert!(Encryption::of(&entry("quota")).is_err());
-        assert!(Encryption::of(&entry("metadata_encryption=rot13")).is_err());
-        assert!(key_dir(&entry("quota")).is_err());
-    }
-
-    #[test]
-    fn the_key_is_in_a_directory_under_the_one_the_phone_names() {
-        let e = entry("keydirectory=/metadata/vold/metadata_encryption");
-        assert_eq!(key_dir(&e).unwrap(), Path::new("/metadata/vold/metadata_encryption/key"));
-    }
-
-    #[test]
-    fn the_partition_is_mapped_in_whole_units_of_the_hardwares_reads() {
-        let e = Encryption { cipher: "aes-xts-plain64".into(), wrapped: true };
-        let t = target("/dev/block/by-name/userdata", 969_825_751, &[0xAB, 0x01], &e);
-        let Target::DefaultKey { sectors, key, cipher, device, wrapped } = t else { panic!("a decrypting target") };
-        assert_eq!(sectors, 969_825_744, "a whole number of 4096-byte units");
-        assert_eq!(key, "ab01");
-        assert_eq!(cipher, "aes-xts-plain64");
-        assert_eq!(device, "/dev/block/by-name/userdata");
-        assert!(wrapped);
-    }
 }

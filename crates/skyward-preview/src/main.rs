@@ -110,6 +110,7 @@ fn two_systems() -> Overview {
         other: Some(Other { id: "ubuntu-touch".into(), name: "Ubuntu Touch".into(), version: "24.04-1.x".into(), size: 32_000_000_000 }),
         other_starts: false,
         changed: false,
+        held: skyward_systems::Held::Recorded,
     }
 }
 
@@ -280,6 +281,21 @@ fn main() -> Result<()> {
         let mut app = opened(Screen::Installing, w, h, ppd);
         app.state.dark = dark;
         app.state.install = install;
+        let path = out.join(format!("{name}.png"));
+        write_png(&path, &whole_page(&mut app, &fonts, &info))?;
+        println!("wrote {}", path.display());
+    }
+
+    // The settings page as a phone whose panel offers both the always-on face
+    // and the two-tap wake shows it: both switches there, both off, which is
+    // what a freshly flashed phone has.
+    for (name, dark) in [("202-settings-panel-switches-light", false), ("203-settings-panel-switches-dark", true)] {
+        let mut app = App::new(Screen::Settings, w, h, ppd);
+        app.state.lang = lang;
+        app.state.dark = dark;
+        app.state.data = Data::Open;
+        app.state.panel_dozes = true;
+        app.state.panel_taps = true;
         let path = out.join(format!("{name}.png"));
         write_png(&path, &whole_page(&mut app, &fonts, &info))?;
         println!("wrote {}", path.display());
@@ -1479,6 +1495,7 @@ fn skyward_newest() -> Newest {
             size: 43_145_196,
             sha256: "9f6165079529418d8f6635beddfdd9abf9a70c89d69eb467a9922b0db69bfaf1".into(),
         }),
+        via: None,
     }
 }
 

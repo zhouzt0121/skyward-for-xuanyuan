@@ -20,6 +20,12 @@ diagonal = 6.73
 # against the glass: 168 and 384 were both too round, 96 too square, and 140
 # is what the stock settings round theirs to on this phone.
 corner_radius = 140
+# The panel is left in the mode it comes up in. This phone's panel has a
+# 120 Hz mode beside its 60, and switching to it once the pages are up is a
+# modeset the display controller pays for in power; a recovery's pages are
+# mostly still, and 60 draws the moving ones well enough. Naming `true` here
+# would switch it, as the builds before 0.2.3 did on every phone.
+fastest_refresh = false
 
 [modules]
 sources = ["vendor_boot", "vendor_dlkm", "vendor", "system_dlkm"]
@@ -44,9 +50,11 @@ load = ["synaptics_tcm2", "stm_st54se_gpio", "stm_nfc_i2c"]
 writes = [{ path = "/sys/class/touch/touch_dev/enable_touch_raw", value = "0" }]
 # Two taps on the dark panel light it again, as the phone's own system's
 # double tap does. Its controller keeps reporting fingers while the panel is
-# off, so the taps arrive; a suspended phone is one they cannot arrive at,
-# which is why the recovery then stays awake with the panel off - that is
-# the price of lighting it without the power key.
+# off, so the taps arrive. This only says the panel *can*: the gesture is a
+# switch on the settings page and ships off, because it costs the phone its
+# suspend — the panel has to keep dozing dark for the taps to be felt, since
+# Xiaomi's driver suspends the touch IC on the panel's blanking notice, so a
+# panel taken down is a touchscreen that reports nothing.
 double_tap = true
 
 # The node the phone's own init opens to every program as it boots, which a
@@ -231,6 +239,11 @@ groups = ["root"]
 [wlan]
 modules = ["rfkill", "qca_cld3_peach_v2"]
 writes = [{ path = "/sys/bus/platform/devices/b0000000.qcom,cnss-peach/fs_ready", value = "1" }]
+# The same switch set back when the WLAN is put away, as the phone's own init
+# does as it goes down: the driver stops the chip on it, and a chip left
+# running is one the system's driver finds already up when it boots, which it
+# cannot start cold -- the WLAN then stays dead until the phone loses power.
+release = [{ path = "/sys/bus/platform/devices/b0000000.qcom,cnss-peach/fs_ready", value = "0" }]
 firmware = [
     { name = "wlan/qca_cld/peach/WCNSS_qcom_cfg.ini", path = "/vendor/etc/wifi/peach/WCNSS_qcom_cfg.ini" },
     { name = "wlan/qca_cld/peach/wlan_mac.bin", partition = "persist", path = "wlan/wlan_mac.bin" },
@@ -284,7 +297,12 @@ firmware = [
     { name = "cs40l26-dbc.bin", path = "/odm/firmware/cs40l26-dbc.bin" },
     { name = "cs40l26-a2h.bin", path = "/odm/firmware/cs40l26-a2h.bin" },
 ]
-strength = { lightest = 0.25, strongest = 0.75 }
+# From four tenths to the whole of what the waveform drives the motor with:
+# the owner tried the click at the old three quarters and found both ends of
+# the slider too weak, so the ceiling is the driver's own top now. If the
+# motor rattles at the top end, that is where the rattle is, and it is the
+# ceiling that comes down rather than the slider's reach.
+strength = { lightest = 0.4, strongest = 1.0 }
 
 # The panel's own doze, as the system's always-on display uses it, tried by
 # hand in the recovery.

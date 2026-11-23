@@ -56,6 +56,10 @@ jobs:
     # only leaves an artifact and needs no more than to read it.
     permissions:
       contents: write
+    # The name the built image shows as its builder. Unset, the row is left
+    # off the page.
+    env:
+      SKYWARD_BUILDER: 大口吃饭
     steps:
       - uses: actions/checkout@v4
 
@@ -103,8 +107,6 @@ jobs:
           RECOVERY: ${{ steps.stock.outputs.recovery }}
         run: echo "$RECOVERY  stock/recovery.img" | sha256sum --check
 
-      # The image is named for the build, the phone and the stock version it
-      # is made on, as the releases name theirs; on a tag that is the tag.
       - name: Pack the recovery
         id: pack
         env:

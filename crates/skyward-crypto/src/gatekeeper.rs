@@ -13,8 +13,9 @@
 // The calls and answers serve the phone's own driver and the host tests.
 #![cfg_attr(not(target_os = "android"), allow(dead_code))]
 
+use crate::credential::Rejection;
 use crate::token::Token;
-use anyhow::{bail, Context, Result};
+use anyhow::{Context, Result, bail};
 use skyward_binder::hidl::{Answer, Message};
 use skyward_binder::parcel::{Parcel, Reader};
 use skyward_binder::status;
@@ -35,6 +36,7 @@ const HARDWARE_VERIFY: u32 = 2;
 const RIGHT: i32 = 0;
 const RIGHT_BUT_RENEW: i32 = 1;
 const HOLDING_OFF: i32 = -2;
+const INCORRECT: i32 = -1;
 
 /// The newer kind's own error for a try made while it holds off further
 /// ones. It does not say for how long.
@@ -63,16 +65,30 @@ fn ask(slot: u32, enrolled: &[u8], password: &[u8]) -> Parcel {
 fn note(read: &mut Reader) -> Result<Token> {
     if let Err(e) = status::ok(read) {
         return Err(match status::refused_with(&e) {
-            Some(RETRY_TIMEOUT) => e.context("the phone is holding off further tries"),
-            Some(_) => e.context("the secure world does not recognise that credential"),
-            None => e.context("have the secure world check the credential"),
+            Some(RETRY_TIMEOUT) => e
+                .context(Rejection::Retry {
+                    seconds: None,
+                    incorrect: false,
+                })
+                .context("the phone is holding off further tries"),
+            Some(INCORRECT) => e
+                .context(Rejection::Incorrect)
+                .context("the secure world does not recognise that credential"),
+            _ => e.context("have the secure world check the credential"),
         });
     }
-    let end = read.structure().context("read what the secure world said about the credential")?;
+    let end = read
+        .structure()
+        .context("read what the secure world said about the credential")?;
     // Whether the credential is to be enrolled again, and how long to wait,
     // which a right answer leaves at nothing.
-    read.i32().context("read how the secure world took the credential")?;
-    read.i32().context("read how long the secure world asks to wait")?;
+    let said = read
+        .i32()
+        .context("read how the secure world took the credential")?;
+    let wait = read
+        .i32()
+        .context("read how long the secure world asks to wait")?;
+    checked(said, wait)?;
     let note = written(read).context("read the note the secure world wrote")?;
     read.go(end)?;
     Ok(note)
@@ -94,7 +110,14 @@ fn written(read: &mut Reader) -> Result<Token> {
     if mac.is_empty() {
         bail!("the secure world took the credential but wrote no note for the key service");
     }
-    Ok(Token { challenge, user, authenticator, kind, when, mac })
+    Ok(Token {
+        challenge,
+        user,
+        authenticator,
+        kind,
+        when,
+        mac,
+    })
 }
 
 /// The call that has the older kind check `password` against `slot`.
@@ -109,24 +132,52 @@ fn ask_hardware(slot: u32, enrolled: &[u8], password: &[u8]) -> Message {
 
 /// What the older kind answered: the note it wrote for a right answer.
 fn hardware_note(read: &mut Answer) -> Result<Token> {
-    read.status().context("have the secure world check the credential")?;
-    let answer = read.pointed().context("read what the secure world said about the credential")?;
+    read.status()
+        .context("have the secure world check the credential")?;
+    let answer = read
+        .pointed()
+        .context("read what the secure world said about the credential")?;
     if answer.len() < ANSWER_BYTES {
-        bail!("the secure world answered {} bytes about the credential", answer.len());
+        bail!(
+            "the secure world answered {} bytes about the credential",
+            answer.len()
+        );
     }
     let said = i32::from_le_bytes(answer[0..4].try_into().expect("four bytes"));
     let wait = i32::from_le_bytes(answer[4..8].try_into().expect("four bytes"));
     let length = u32::from_le_bytes(answer[NOTE_LENGTH].try_into().expect("four bytes"));
-    match said {
-        RIGHT | RIGHT_BUT_RENEW => {}
-        HOLDING_OFF => bail!("the phone is holding off further tries for another {} seconds", (wait + 999) / 1000),
-        _ => bail!("the secure world does not recognise that credential"),
-    }
+    checked(said, wait)?;
     if length == 0 {
         bail!("the secure world took the credential but wrote no note for the key service");
     }
-    let note = read.pointed().context("read the note the secure world wrote")?;
+    let note = read
+        .pointed()
+        .context("read the note the secure world wrote")?;
     Token::of(note)
+}
+
+/// A successful Binder call can still carry a credential refusal.
+fn checked(said: i32, wait: i32) -> Result<()> {
+    match said {
+        RIGHT | RIGHT_BUT_RENEW => Ok(()),
+        INCORRECT => Err(anyhow::Error::new(Rejection::Incorrect)
+            .context("the secure world does not recognise that credential")),
+        HOLDING_OFF => {
+            let seconds = (wait > 0).then(|| (wait as u64).div_ceil(1000));
+            let why = match seconds {
+                Some(seconds) => {
+                    format!("the phone is holding off further tries for another {seconds} seconds")
+                }
+                None => "the phone is holding off further tries".into(),
+            };
+            Err(anyhow::Error::new(Rejection::Retry {
+                seconds,
+                incorrect: false,
+            })
+            .context(why))
+        }
+        _ => bail!("the secure world returned an unknown credential status {said}"),
+    }
 }
 
 /// The phone's credential service, as this program talks to it.
@@ -141,14 +192,20 @@ impl<'a> Gatekeeper<'a> {
     /// Reach the running credential service: the newer kind through
     /// `binder` where the phone describes one, the older kind through
     /// `hardware` otherwise. Say so where it is not running.
-    pub fn open(binder: &'a skyward_binder::driver::Binder, hardware: &'a skyward_binder::driver::Binder) -> Result<Gatekeeper<'a>> {
+    pub fn open(
+        binder: &'a skyward_binder::driver::Binder,
+        hardware: &'a skyward_binder::driver::Binder,
+    ) -> Result<Gatekeeper<'a>> {
         use skyward_binder::{hidl, service};
-        let not_running = |name: &str| format!("{name} is not running; the phone's credential service has to be started first");
+        let not_running = |name: &str| {
+            format!("{name} is not running; the phone's credential service has to be started first")
+        };
         if service::declared(binder, SERVICE)? {
             let device = service::find(binder, SERVICE)?.with_context(|| not_running(SERVICE))?;
             return Ok(Gatekeeper::Newer(device));
         }
-        let device = hidl::find(hardware, HARDWARE_SERVICE, INSTANCE)?.with_context(|| not_running(HARDWARE_SERVICE))?;
+        let device = hidl::find(hardware, HARDWARE_SERVICE, INSTANCE)?
+            .with_context(|| not_running(HARDWARE_SERVICE))?;
         Ok(Gatekeeper::Older(device))
     }
 
@@ -167,7 +224,9 @@ impl<'a> Gatekeeper<'a> {
     /// answer.
     pub fn version(&self) -> Result<Option<i32>> {
         match self {
-            Gatekeeper::Newer(device) => skyward_binder::service::version(device, INTERFACE).map(Some),
+            Gatekeeper::Newer(device) => {
+                skyward_binder::service::version(device, INTERFACE).map(Some)
+            }
             Gatekeeper::Older(_) => Ok(None),
         }
     }
@@ -184,11 +243,15 @@ impl<'a> Gatekeeper<'a> {
         let what = "have the secure world check the credential";
         match self {
             Gatekeeper::Newer(device) => {
-                let reply = device.transact(VERIFY, &ask(slot, enrolled, password)).context(what)?;
+                let reply = device
+                    .transact(VERIFY, &ask(slot, enrolled, password))
+                    .context(what)?;
                 note(&mut reply.read())
             }
             Gatekeeper::Older(device) => {
-                let reply = device.transact(HARDWARE_VERIFY, &ask_hardware(slot, enrolled, password)).context(what)?;
+                let reply = device
+                    .transact(HARDWARE_VERIFY, &ask_hardware(slot, enrolled, password))
+                    .context(what)?;
                 hardware_note(&mut Answer::new(reply.bytes()))
             }
         }
@@ -259,16 +322,63 @@ mod tests {
         let token = note(&mut Reader::new(&reply)).unwrap();
         assert_eq!(
             token,
-            Token { challenge: 0, user: 0x253c_22c3_acbb_a741, authenticator: 9, kind: 1, when: 1_700_000_000, mac: vec![0xAB; 32] }
+            Token {
+                challenge: 0,
+                user: 0x253c_22c3_acbb_a741,
+                authenticator: 9,
+                kind: 1,
+                when: 1_700_000_000,
+                mac: vec![0xAB; 32]
+            }
         );
+    }
+
+    #[test]
+    fn a_binder_success_can_carry_a_wrong_password_or_a_retry() {
+        for (said, wait, expected) in [
+            (INCORRECT, 0, Some(Rejection::Incorrect)),
+            (
+                HOLDING_OFF,
+                29001,
+                Some(Rejection::Retry {
+                    seconds: Some(30),
+                    incorrect: false,
+                }),
+            ),
+            (91, 0, None),
+        ] {
+            let mut p = Parcel::default();
+            p.i32(0);
+            structure(&mut p, |p| {
+                p.i32(said);
+                p.i32(wait);
+            });
+            let error = note(&mut Reader::new(p.bytes())).unwrap_err();
+            assert_eq!(crate::credential::rejection(&error), expected);
+        }
+        let error = checked(HOLDING_OFF, i32::MAX).unwrap_err();
+        assert_eq!(
+            crate::credential::rejection(&error),
+            Some(Rejection::Retry {
+                seconds: Some(2147484),
+                incorrect: false
+            })
+        );
+        let error = note(&mut Reader::new(&refused(91))).unwrap_err();
+        assert_eq!(crate::credential::rejection(&error), None);
     }
 
     #[test]
     fn the_newer_kinds_refusals_say_what_they_mean() {
         let wrong = note(&mut Reader::new(&refused(-1))).unwrap_err();
-        assert!(format!("{wrong:#}").starts_with("the secure world does not recognise that credential"));
+        assert!(
+            format!("{wrong:#}").starts_with("the secure world does not recognise that credential")
+        );
         let waiting = note(&mut Reader::new(&refused(RETRY_TIMEOUT))).unwrap_err();
         assert!(format!("{waiting:#}").starts_with("the phone is holding off further tries"));
-        assert!(note(&mut Reader::new(&answered(&[]))).is_err(), "a right answer with no note");
+        assert!(
+            note(&mut Reader::new(&answered(&[]))).is_err(),
+            "a right answer with no note"
+        );
     }
 }

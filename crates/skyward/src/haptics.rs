@@ -1,4 +1,4 @@
-use anyhow::{anyhow, ensure, Context, Result};
+use anyhow::{Context, Result, anyhow, ensure};
 use evdev::raw_stream::RawDevice;
 use skyward_config::Strength;
 use std::f32::consts::{FRAC_PI_2, TAU};
@@ -85,19 +85,42 @@ impl Haptics {
     /// only as it is played.
     pub fn open(cfg: &skyward_config::Haptics) -> Result<Haptics> {
         let (path, dev) = motor()?;
-        let hz = resonance(cfg.resonance.as_deref().context("the configuration names no file for the motor's resonant frequency")?)?;
+        let hz = resonance(
+            cfg.resonance
+                .as_deref()
+                .context("the configuration names no file for the motor's resonant frequency")?,
+        )?;
         let click = match cfg.click {
             Some(id) => {
-                eprintln!("haptics {}: clicks with waveform {id}, ticks made for a motor swinging at {hz} Hz", path.display());
+                eprintln!(
+                    "haptics {}: clicks with waveform {id}, ticks made for a motor swinging at {hz} Hz",
+                    path.display()
+                );
                 Click::Kept(id)
             }
             None => {
-                eprintln!("haptics {}: clicks and ticks made for a motor swinging at {hz} Hz", path.display());
-                Click::Samples { data: made(hz), rate: RATE }
+                eprintln!(
+                    "haptics {}: clicks and ticks made for a motor swinging at {hz} Hz",
+                    path.display()
+                );
+                Click::Samples {
+                    data: made(hz),
+                    rate: RATE,
+                }
             }
         };
-        let ticks = Click::Samples { data: ticks(hz), rate: TICKS_RATE };
-        Ok(Haptics { dev, click, ticks, strength: cfg.strength, playing: Arc::new(Mutex::new(None)), clicks: 0 })
+        let ticks = Click::Samples {
+            data: ticks(hz),
+            rate: TICKS_RATE,
+        };
+        Ok(Haptics {
+            dev,
+            click,
+            ticks,
+            strength: cfg.strength,
+            playing: Arc::new(Mutex::new(None)),
+            clicks: 0,
+        })
     }
 
     /// One short click at the strength the slider's `position` gives, after
@@ -115,7 +138,10 @@ impl Haptics {
     /// Play the ticks, or else the click, at `share` of its full strength,
     /// after taking away what still plays.
     fn start(&mut self, ticks: bool, share: f32) -> Result<Duration> {
-        let mut playing = self.playing.lock().expect("no thread panics while it holds the click playing");
+        let mut playing = self
+            .playing
+            .lock()
+            .expect("no thread panics while it holds the click playing");
         if let Some((slot, _)) = playing.take() {
             erase(&self.dev, slot).context("take away the click still playing")?;
         }
@@ -133,7 +159,9 @@ impl Haptics {
         let playing = self.playing.clone();
         std::thread::spawn(move || {
             std::thread::sleep(until.saturating_duration_since(Instant::now()));
-            let mut playing = playing.lock().expect("no thread panics while it holds the click playing");
+            let mut playing = playing
+                .lock()
+                .expect("no thread panics while it holds the click playing");
             if *playing == Some(this) {
                 *playing = None;
                 if let Err(e) = erase(&dev, this.0) {
@@ -153,12 +181,19 @@ pub fn probe(cfg: &skyward_config::Haptics, position: f32, ticks: bool) -> Resul
     let (what, strength, length) = if ticks {
         ("ticks", TICKS_STRENGTH, haptics.ticks()?)
     } else {
-        ("click", share(&cfg.strength, position), haptics.click(position)?)
+        (
+            "click",
+            share(&cfg.strength, position),
+            haptics.click(position)?,
+        )
     };
     // Once it has played out, what played goes with the device as the
     // command ends.
     std::thread::sleep(length);
-    println!("played the {what} at {strength:.3} of the full strength, {} ms long", length.as_millis());
+    println!(
+        "played the {what} at {strength:.3} of the full strength, {} ms long",
+        length.as_millis()
+    );
     Ok(())
 }
 
@@ -174,7 +209,10 @@ pub fn bring_up(cfg: &skyward_config::Haptics, sources: &[String]) -> Result<()>
         crate::wlan::place_firmware(file)?;
     }
     if !cfg.modules.is_empty() {
-        let dirs = sources.iter().map(|s| skyward_modules::source_dir(s)).collect::<Result<Vec<_>>>()?;
+        let dirs = sources
+            .iter()
+            .map(|s| skyward_modules::source_dir(s))
+            .collect::<Result<Vec<_>>>()?;
         for path in skyward_modules::load(&dirs, &cfg.modules)? {
             skyward_sys::kmsg(&format!("loaded {} for the motor", path.display()))?;
         }
@@ -196,13 +234,21 @@ fn reprobe(cfg: &skyward_config::Haptics) -> Result<()> {
     for module in &cfg.modules {
         let driver = driver_name(module);
         let at = Path::new("/sys/bus/i2c/drivers").join(&driver);
-        let Ok(listing) = fs::read_dir(&at) else { continue };
-        let bound: Vec<_> = listing.flatten().map(|e| e.file_name()).filter(|n| n.to_string_lossy().contains('-')).collect();
+        let Ok(listing) = fs::read_dir(&at) else {
+            continue;
+        };
+        let bound: Vec<_> = listing
+            .flatten()
+            .map(|e| e.file_name())
+            .filter(|n| n.to_string_lossy().contains('-'))
+            .collect();
         for name in &bound {
             let name = name.to_string_lossy();
             let _ = fs::write(at.join("unbind"), name.as_ref());
             let _ = fs::write(at.join("bind"), name.as_ref());
-            skyward_sys::kmsg(&format!("bound {driver} to {name} again so it probes the motor with its firmware"))?;
+            skyward_sys::kmsg(&format!(
+                "bound {driver} to {name} again so it probes the motor with its firmware"
+            ))?;
         }
     }
     // The device node and its force-feedback device appear as the probe
@@ -221,7 +267,10 @@ fn reprobe(cfg: &skyward_config::Haptics) -> Result<()> {
 /// without the bus it sits on, as cs40l26-i2c is the driver cs40l26 and
 /// cs40l26-core is none.
 fn driver_name(module: &str) -> String {
-    module.trim_end_matches("-core").trim_end_matches("-i2c").replace('_', "-")
+    module
+        .trim_end_matches("-core")
+        .trim_end_matches("-i2c")
+        .replace('_', "-")
 }
 
 /// Whether any input device takes periodic force-feedback effects yet.
@@ -237,7 +286,11 @@ const PROBE_WAIT: std::time::Duration = std::time::Duration::from_secs(3);
 fn motor() -> Result<(PathBuf, File)> {
     for (path, dev) in evdev::raw_stream::enumerate() {
         if takes_periodic(&dev) {
-            let file = OpenOptions::new().read(true).write(true).open(&path).with_context(|| format!("open {}", path.display()))?;
+            let file = OpenOptions::new()
+                .read(true)
+                .write(true)
+                .open(&path)
+                .with_context(|| format!("open {}", path.display()))?;
             return Ok((path, file));
         }
     }
@@ -245,7 +298,8 @@ fn motor() -> Result<(PathBuf, File)> {
 }
 
 fn takes_periodic(dev: &RawDevice) -> bool {
-    dev.supported_ff().is_some_and(|ff| ff.contains(evdev::FFEffectCode::FF_PERIODIC))
+    dev.supported_ff()
+        .is_some_and(|ff| ff.contains(evdev::FFEffectCode::FF_PERIODIC))
 }
 
 /// The share of the click's full strength at the slider's `position`.
@@ -257,7 +311,11 @@ fn share(strength: &Strength, position: f32) -> f32 {
 /// it in, in tenths of a hertz.
 fn resonance(file: &str) -> Result<f32> {
     let text = fs::read_to_string(file).with_context(|| format!("read {file}"))?;
-    let tenths: u32 = text.split_whitespace().next().and_then(|n| n.parse().ok()).with_context(|| format!("{file} holds {text:?}"))?;
+    let tenths: u32 = text
+        .split_whitespace()
+        .next()
+        .and_then(|n| n.parse().ok())
+        .with_context(|| format!("{file} holds {text:?}"))?;
     ensure!(tenths > 0, "{file} says the motor swings at 0 Hz");
     Ok(tenths as f32 / 10.0)
 }
@@ -287,7 +345,11 @@ fn ticks(hz: f32) -> Vec<i8> {
             let (start, peak, end) = (start + offset, peak + offset, end + offset);
             for (i, sample) in samples.iter_mut().enumerate().take(at(end)).skip(at(start)) {
                 let t = i as f32 * 1000.0 / TICKS_RATE as f32 / scale;
-                let (way, power) = if t < peak { ((t - start) / (peak - start), rise) } else { ((end - t) / (end - peak), fall) };
+                let (way, power) = if t < peak {
+                    ((t - start) / (peak - start), rise)
+                } else {
+                    ((end - t) / (end - peak), fall)
+                };
                 let k = (FRAC_PI_2 * way.clamp(0.0, 1.0)).sin().powf(power);
                 *sample = (strength * share * k * f32::from(i8::MAX)).round() as i8;
             }
@@ -324,7 +386,12 @@ fn upload(dev: &File, click: &Click, share: f32) -> Result<Loaded> {
     // waveform's number from the first of three values and writes how long
     // it plays into the other two, in whole seconds and then milliseconds.
     let mut kept: [i16; 3] = [0; 3];
-    let mut samples = Samples { index: 0, length: 0, rate: RATE, data: std::ptr::null() };
+    let mut samples = Samples {
+        index: 0,
+        length: 0,
+        rate: RATE,
+        data: std::ptr::null(),
+    };
     let (len, data) = match click {
         Click::Kept(id) => {
             kept[0] = *id;
@@ -334,7 +401,10 @@ fn upload(dev: &File, click: &Click, share: f32) -> Result<Loaded> {
             samples.length = u32::try_from(data.len())?;
             samples.rate = *rate;
             samples.data = data.as_ptr();
-            (std::mem::size_of::<Samples>(), (&mut samples as *mut Samples).cast::<i16>())
+            (
+                std::mem::size_of::<Samples>(),
+                (&mut samples as *mut Samples).cast::<i16>(),
+            )
         }
     };
     let periodic = libc::ff_periodic_effect {
@@ -343,7 +413,12 @@ fn upload(dev: &File, click: &Click, share: f32) -> Result<Loaded> {
         magnitude: (share.clamp(0.0, 1.0) * f32::from(i16::MAX)).round() as i16,
         offset: 0,
         phase: 0,
-        envelope: libc::ff_envelope { attack_length: 0, attack_level: 0, fade_length: 0, fade_level: 0 },
+        envelope: libc::ff_envelope {
+            attack_length: 0,
+            attack_level: 0,
+            fade_length: 0,
+            fade_level: 0,
+        },
         custom_len: len as u32,
         custom_data: data,
     };
@@ -351,12 +426,19 @@ fn upload(dev: &File, click: &Click, share: f32) -> Result<Loaded> {
         type_: FF_PERIODIC,
         id: -1,
         direction: 0,
-        trigger: libc::ff_trigger { button: 0, interval: 0 },
-        replay: libc::ff_replay { length: 0, delay: 0 },
+        trigger: libc::ff_trigger {
+            button: 0,
+            interval: 0,
+        },
+        replay: libc::ff_replay {
+            length: 0,
+            delay: 0,
+        },
         u: [0; 4],
     };
     // The union holds the periodic effect; it is exactly as large.
-    const _: () = assert!(std::mem::size_of::<libc::ff_periodic_effect>() == std::mem::size_of::<[u64; 4]>());
+    const _: () =
+        assert!(std::mem::size_of::<libc::ff_periodic_effect>() == std::mem::size_of::<[u64; 4]>());
     effect.u = unsafe { std::mem::transmute::<libc::ff_periodic_effect, [u64; 4]>(periodic) };
     // EVIOCSFF: _IOW('E', 0x80, struct ff_effect)
     let size = std::mem::size_of::<libc::ff_effect>() as u32;
@@ -367,27 +449,52 @@ fn upload(dev: &File, click: &Click, share: f32) -> Result<Loaded> {
     let length = match click {
         Click::Kept(id) => {
             let [_, seconds, millis] = kept;
-            let length = Duration::from_secs(u64::try_from(seconds)?) + Duration::from_millis(u64::try_from(millis)?);
-            ensure!(!length.is_zero(), "the driver loaded waveform {id} without saying how long it plays");
+            let length = Duration::from_secs(u64::try_from(seconds)?)
+                + Duration::from_millis(u64::try_from(millis)?);
+            ensure!(
+                !length.is_zero(),
+                "the driver loaded waveform {id} without saying how long it plays"
+            );
             length
         }
         // The queue is full before the samples start playing.
-        Click::Samples { data, rate } => Duration::from_secs_f64(data.len() as f64 / f64::from(*rate)),
+        Click::Samples { data, rate } => {
+            Duration::from_secs_f64(data.len() as f64 / f64::from(*rate))
+        }
     };
-    Ok(Loaded { slot: effect.id, length })
+    Ok(Loaded {
+        slot: effect.id,
+        length,
+    })
 }
 
 /// Start the loaded effect in slot `id`.
 fn play(dev: &mut File, id: i16) -> io::Result<()> {
-    let event = libc::input_event { time: libc::timeval { tv_sec: 0, tv_usec: 0 }, type_: EV_FF, code: id as u16, value: 1 };
-    let bytes = unsafe { std::slice::from_raw_parts((&event as *const libc::input_event).cast::<u8>(), std::mem::size_of::<libc::input_event>()) };
+    let event = libc::input_event {
+        time: libc::timeval {
+            tv_sec: 0,
+            tv_usec: 0,
+        },
+        type_: EV_FF,
+        code: id as u16,
+        value: 1,
+    };
+    let bytes = unsafe {
+        std::slice::from_raw_parts(
+            (&event as *const libc::input_event).cast::<u8>(),
+            std::mem::size_of::<libc::input_event>(),
+        )
+    };
     dev.write_all(bytes)
 }
 
 /// Take the effect in slot `id` away, which stops it for good.
 fn erase(dev: &File, id: i16) -> io::Result<()> {
     // EVIOCRMFF: _IOW('E', 0x81, int)
-    let request = (1u32 << 30) | ((std::mem::size_of::<libc::c_int>() as u32) << 16) | (u32::from(b'E') << 8) | 0x81;
+    let request = (1u32 << 30)
+        | ((std::mem::size_of::<libc::c_int>() as u32) << 16)
+        | (u32::from(b'E') << 8)
+        | 0x81;
     if unsafe { libc::ioctl(dev.as_raw_fd(), request as _, libc::c_int::from(id)) } < 0 {
         return Err(io::Error::last_os_error());
     }
@@ -407,7 +514,10 @@ mod tests {
         assert_eq!(*samples.iter().max().unwrap(), i8::MAX);
         let quarter = (RATE as f32 / 172.4 / 4.0).round() as usize;
         assert!(samples[quarter] > 120, "it rises first");
-        assert!(samples[drive + quarter] < -120, "it falls first once turned over");
+        assert!(
+            samples[drive + quarter] < -120,
+            "it falls first once turned over"
+        );
     }
 
     #[test]
@@ -416,24 +526,64 @@ mod tests {
         let samples = ticks(TICKS_HZ);
         let (first, second) = (&samples[..at(12.167)], &samples[at(55.125)..]);
         assert_eq!(samples.len(), at(55.125 + 12.167));
-        assert!(samples[at(12.167)..at(55.125)].iter().all(|&s| s == 0), "still between");
-        let halves = |s: &[i8]| 1 + s.iter().filter(|&&s| s != 0).map(|&s| s > 0).collect::<Vec<_>>().windows(2).filter(|w| w[0] != w[1]).count();
-        assert_eq!((halves(first), halves(second)), (6, 6), "six half-swings each");
+        assert!(
+            samples[at(12.167)..at(55.125)].iter().all(|&s| s == 0),
+            "still between"
+        );
+        let halves = |s: &[i8]| {
+            1 + s
+                .iter()
+                .filter(|&&s| s != 0)
+                .map(|&s| s > 0)
+                .collect::<Vec<_>>()
+                .windows(2)
+                .filter(|w| w[0] != w[1])
+                .count()
+        };
+        assert_eq!(
+            (halves(first), halves(second)),
+            (6, 6),
+            "six half-swings each"
+        );
         let motor = TICKS_RATE as f32 / TICKS_HZ / 2.0;
-        assert!((at(12.167 - 0.125) as f32 / 6.0) < motor, "each quicker than the motor's own");
-        assert_eq!(first.iter().min(), Some(&-i8::MAX), "the first swings to the full");
+        assert!(
+            (at(12.167 - 0.125) as f32 / 6.0) < motor,
+            "each quicker than the motor's own"
+        );
+        assert_eq!(
+            first.iter().min(),
+            Some(&-i8::MAX),
+            "the first swings to the full"
+        );
         for (i, (&a, &b)) in first.iter().zip(second).enumerate() {
-            assert!((f32::from(a) * 0.79 - f32::from(b)).abs() <= 1.0, "the second is the first at 0.79: {a} and {b} at {i}");
+            assert!(
+                (f32::from(a) * 0.79 - f32::from(b)).abs() <= 1.0,
+                "the second is the first at 0.79: {a} and {b} at {i}"
+            );
         }
-        assert_eq!(ticks(TICKS_HZ * 2.0).len(), samples.len().div_ceil(2), "a motor twice as quick ticks in half the time");
+        assert_eq!(
+            ticks(TICKS_HZ * 2.0).len(),
+            samples.len().div_ceil(2),
+            "a motor twice as quick ticks in half the time"
+        );
     }
 
     #[test]
     fn the_slider_spans_the_strengths_each_step_the_same_factor() {
-        let s = Strength { lightest: 0.25, strongest: 1.0 };
+        let s = Strength {
+            lightest: 0.25,
+            strongest: 1.0,
+        };
         assert_eq!((share(&s, 0.0), share(&s, 1.0)), (0.25, 1.0));
         assert!((share(&s, 0.5) - 0.5).abs() < 1e-6);
-        assert!((share(&s, 0.25) / share(&s, 0.0) - share(&s, 1.0) / share(&s, 0.75)).abs() < 1e-6, "each step the same factor");
-        assert_eq!((share(&s, -1.0), share(&s, 2.0)), (0.25, 1.0), "no further than its ends");
+        assert!(
+            (share(&s, 0.25) / share(&s, 0.0) - share(&s, 1.0) / share(&s, 0.75)).abs() < 1e-6,
+            "each step the same factor"
+        );
+        assert_eq!(
+            (share(&s, -1.0), share(&s, 2.0)),
+            (0.25, 1.0),
+            "no further than its ends"
+        );
     }
 }

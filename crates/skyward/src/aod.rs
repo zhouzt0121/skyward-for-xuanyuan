@@ -44,7 +44,10 @@ pub struct Panel {
 
 impl Panel {
     pub fn new(aod: &Aod) -> Self {
-        let feature = |f: &skyward_config::Feature| Feature { id: f.id, value: f.value.clone() };
+        let feature = |f: &skyward_config::Feature| Feature {
+            id: f.id,
+            value: f.value.clone(),
+        };
         let doze = Doze {
             enter: aod.enter.iter().map(feature).collect(),
             enter_cmds: aod.enter_cmds.clone(),
@@ -52,7 +55,15 @@ impl Panel {
             leave_cmds: aod.leave_cmds.clone(),
         };
         let (dir, node) = (PathBuf::from(&aod.dir), PathBuf::from(&aod.node));
-        Panel { doze, dir, node, driver: None, shown: Shown::Lit, given_up: false, refusals: 0 }
+        Panel {
+            doze,
+            dir,
+            node,
+            driver: None,
+            shown: Shown::Lit,
+            given_up: false,
+            refusals: 0,
+        }
     }
 
     /// Whether a dark panel is to show the face rather than be blacked out.
@@ -79,7 +90,8 @@ impl Panel {
         for (name, value) in writes {
             let path = self.dir.join(&name);
             if let Err(e) = fs::write(&path, &value) {
-                let _ = skyward_sys::kmsg(&format!("the panel's {name} is not set to {value}: {e}"));
+                let _ =
+                    skyward_sys::kmsg(&format!("the panel's {name} is not set to {value}: {e}"));
             }
         }
         for cmd in cmds {
