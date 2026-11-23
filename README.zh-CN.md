@@ -1,19 +1,19 @@
 ![Skyward Recovery](assets/hero.jpg)
 
-# Skyward for the Xiaomi 15 Pro
+# Skyward for the Xiaomi 15 Ultra
 
 [English](README.md) | 简体中文
 
-[![version](https://img.shields.io/github/v/release/Rinrroy/skyward-for-haotian?display_name=tag&label=version&color=4c8ddf)](https://github.com/Rinrroy/skyward-for-haotian/releases/latest)
-[![CI](https://img.shields.io/github/actions/workflow/status/Rinrroy/skyward-for-haotian/build-haotian.yml?branch=main&label=CI)](https://github.com/Rinrroy/skyward-for-haotian/actions/workflows/build-haotian.yml)
-[![license](https://img.shields.io/github/license/Rinrroy/skyward-for-haotian?label=license&color=4c8ddf)](LICENSE)
-[![status](https://img.shields.io/badge/status-公开测试-8ea9f1)](https://github.com/Rinrroy/skyward-for-haotian/releases)
-[![device](https://img.shields.io/badge/设备-Xiaomi_15_Pro_(haotian)-555555)](#skyward-是使用-rust-编写的-recovery)
-[![stars](https://img.shields.io/github/stars/Rinrroy/skyward-for-haotian?style=flat&label=stars&color=4c8ddf)](https://github.com/Rinrroy/skyward-for-haotian/stargazers)
-[![downloads](https://img.shields.io/github/downloads/Rinrroy/skyward-for-haotian/total?style=flat&label=下载量&color=4c8ddf)](https://github.com/Rinrroy/skyward-for-haotian/releases)
+[![version](https://img.shields.io/github/v/release/zhouzt0121/skyward-for-xuanyuan?display_name=tag&label=version&color=4c8ddf)](https://github.com/zhouzt0121/skyward-for-xuanyuan/releases/latest)
+[![CI](https://img.shields.io/github/actions/workflow/status/zhouzt0121/skyward-for-xuanyuan/build-xuanyuan.yml?branch=main&label=CI)](https://github.com/zhouzt0121/skyward-for-xuanyuan/actions/workflows/build-xuanyuan.yml)
+[![license](https://img.shields.io/github/license/zhouzt0121/skyward-for-xuanyuan?label=license&color=4c8ddf)](LICENSE)
+[![status](https://img.shields.io/badge/status-公开测试-8ea9f1)](https://github.com/zhouzt0121/skyward-for-xuanyuan/releases)
+[![device](https://img.shields.io/badge/设备-Xiaomi_15_Ultra_(xuanyuan)-555555)](#skyward-是使用-rust-编写的-recovery)
+[![stars](https://img.shields.io/github/stars/zhouzt0121/skyward-for-xuanyuan?style=flat&label=stars&color=4c8ddf)](https://github.com/zhouzt0121/skyward-for-xuanyuan/stargazers)
+[![downloads](https://img.shields.io/github/downloads/zhouzt0121/skyward-for-xuanyuan/total?style=flat&label=下载量&color=4c8ddf)](https://github.com/zhouzt0121/skyward-for-xuanyuan/releases)
 
 Skyward 是使用 Rust 编写的 recovery，从零开始编写。本分支只为一台手机构建：
-**Xiaomi 15 Pro（`haotian`）**，基于中国版系统 OS4.0.0.19。
+**Xiaomi 15 Ultra（`xuanyuan`）**，基于中国版系统 OS4.0.4.0.XOACNXM。
 
 <p align="center">
   <img src="assets/home.png" width="30%" alt="首页">
@@ -51,7 +51,7 @@ eSE 的两个驱动和安全元件的 HAL 都起来之后才能访问它。本�
 
 ![系统和 Skyward 都能在线更新](slides/zh-CN/out/05-updates.png)
 
-Skyward 自身的更新来自[本仓库](https://github.com/Rinrroy/skyward-for-haotian/releases)
+Skyward 自身的更新来自[本仓库](https://github.com/zhouzt0121/skyward-for-xuanyuan/releases)
 的最新版本，并且资产就是镜像本身，不再套一层 zip。
 
 下载可以暂停再继续，下载完的安装包也可以删除。暂停只是停下不再写：已经下载的
@@ -128,7 +128,7 @@ SHA-256。开关在「设置 → 更新来源」，默认开着。
 
 ## 本分支在上游基础上增加的内容
 
-上游 Skyward 是支持多机型的 recovery。本分支只保留自己的 `devices/haotian.toml`，
+上游 Skyward 是支持多机型的 recovery。本分支只保留自己的 `devices/xuanyuan.toml`，
 并补上这台手机的硬件实际需要的东西：
 
 - **weaver 能应答了，因此只绑定 weaver 的 data 分区也能打开。** 密钥由安全元件
@@ -159,7 +159,7 @@ SHA-256。开关在「设置 → 更新来源」，默认开着。
 
 | 机型 | 代号 | 基于 | 已验证 |
 | --- | --- | --- | --- |
-| Xiaomi 15 Pro | `haotian` | OS4.0.0.19.XOBCNXM (Android 17) | 是 |
+| Xiaomi 15 Ultra | `xuanyuan` | OS4.0.4.0.XOACNXM (Android 17) | 是 |
 
 ### 尚未实现
 
@@ -167,12 +167,12 @@ SHA-256。开关在「设置 → 更新来源」，默认开着。
 - 增量更新包
 - 没有 A/B 槽位的手机的更新包
 
-## Xiaomi 15 Pro 上的注意事项
+## Xiaomi 15 Ultra 上的注意事项
 
 这些都在真机上试过并且可用：屏幕（包括它交给显示控制器做的亚像素渲染）、触摸屏、
 adb 与 fastbootd、MTP、马达、WLAN，以及用锁屏密码解密 data 分区。
 
-镜像所基于的原厂版本是 OS4.0.0.19.XOBCNXM。
+镜像所基于的原厂版本是 OS4.0.4.0.XOACNXM。
 
 ### 如果解密仍然失败
 
@@ -200,12 +200,12 @@ adb 与 fastbootd、MTP、马达、WLAN，以及用锁屏密码解密 data 分�
 ## 安装 Skyward
 
 Skyward 需要已解锁的 bootloader。从
-[Releases](https://github.com/Rinrroy/skyward-for-haotian/releases) 下载镜像，
+[Releases](https://github.com/zhouzt0121/skyward-for-xuanyuan/releases) 下载镜像，
 用 `SHA256SUMS` 校验，然后在 fastboot 模式下刷入手机当前槽位的 recovery 分区：
 
 ```sh
 sha256sum --check SHA256SUMS
-fastboot flash recovery skyward-v0.2.4-haotian-OS4.0.0.19.XOBCNXM.img
+fastboot flash recovery skyward-v1.0.1-xuanyuan-OS4.0.4.0.XOACNXM.img
 fastboot reboot recovery
 ```
 
@@ -213,10 +213,10 @@ fastboot reboot recovery
 新镜像也可以从它自己的「安装」页刷入。开启**再次刷入 Skyward** 后，写入 recovery
 分区的系统更新或刷机包会把 Skyward 重新装回去。
 
-更新页向 `api.github.com/repos/Rinrroy/skyward-for-haotian` 询问最新版本，取名为
-`skyward-<tag>-haotian-<stock>.img` 的资产——也就是镜像本身，直接以镜像发布，不再
+更新页向 `api.github.com/repos/zhouzt0121/skyward-for-xuanyuan` 询问最新版本，取名为
+`skyward-<tag>-xuanyuan-<stock>.img` 的资产——也就是镜像本身，直接以镜像发布，不再
 套一层 zip。若你要再开一个分支，请改 `skyward_net::github::LATEST` 指向你自己的
-仓库，否则手机会被推给为 `haotian` 构建、但它用不了的镜像。
+仓库，否则手机会被推给为 `xuanyuan` 构建、但它用不了的镜像。
 
 super 里没有系统时，Skyward 仍会启动，屏幕、按键、adb、`adb sideload` 和 fastbootd
 都在，足够装一个系统。触摸、WLAN 和解密都跑在已安装的系统上，会随它一起回来。
@@ -283,18 +283,18 @@ cargo build --release -p skyward-pack
 并把它的 SHA-256 与设备文件里的值核对：
 
 ```sh
-target/release/skyward-pack stock --config devices/haotian.toml --out target/stock/haotian/recovery.img
-target/release/skyward-pack stock --config devices/haotian.toml --out target/stock/haotian/recovery.img --partition odm
+target/release/skyward-pack stock --config devices/xuanyuan.toml --out target/stock/xuanyuan/recovery.img
+target/release/skyward-pack stock --config devices/xuanyuan.toml --out target/stock/xuanyuan/recovery.img --partition odm
 ```
 
 然后在它之上构建镜像：
 
 ```sh
 target/release/skyward-pack recovery \
-  --stock target/stock/haotian/recovery.img \
+  --stock target/stock/xuanyuan/recovery.img \
   --binary target/aarch64-linux-android/release/skyward \
   --system-init target/system-init/aarch64-linux-android/release/system-init \
-  --config devices/haotian.toml \
+  --config devices/xuanyuan.toml \
   --font resources/fonts/MiSansVF.ttf \
   --mono resources/fonts/KirkMono-Regular.ttf \
   --mono-license resources/fonts/KirkMono-OFL.txt \
@@ -305,11 +305,11 @@ target/release/skyward-pack recovery \
   --firmware cs40l26-dbc.bin=stock/firmware/cs40l26-dbc.bin \
   --firmware cs40l26-a2h.bin=stock/firmware/cs40l26-a2h.bin \
   --omapi resources/omapi \
-  --out target/skyward-haotian.img
+  --out target/skyward-xuanyuan.img
 ```
 
 马达的固件必须在 init 第一次探测之前就在 ramdisk 里；`--omapi` 会放入 Thales weaver
-访问安全元件所经过的 OMAPI 服务。`.github/workflows/build-haotian.yml` 在打标签时
+访问安全元件所经过的 OMAPI 服务。`.github/workflows/build-xuanyuan.yml` 在打标签时
 完成这些，并把镜像连同校验和一起发布。
 
 测试与 lint 在电脑上运行；只跑在手机上的代码针对手机做 lint：

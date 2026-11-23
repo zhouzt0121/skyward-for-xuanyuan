@@ -1,19 +1,19 @@
 ![Skyward Recovery](assets/hero.jpg)
 
-# Skyward for the Xiaomi 15 Pro
+# Skyward for the Xiaomi 15 Ultra
 
 English | [简体中文](README.zh-CN.md)
 
-[![version](https://img.shields.io/github/v/release/Rinrroy/skyward-for-haotian?display_name=tag&label=version&color=4c8ddf)](https://github.com/Rinrroy/skyward-for-haotian/releases/latest)
-[![CI](https://img.shields.io/github/actions/workflow/status/Rinrroy/skyward-for-haotian/build-haotian.yml?branch=main&label=CI)](https://github.com/Rinrroy/skyward-for-haotian/actions/workflows/build-haotian.yml)
-[![license](https://img.shields.io/github/license/Rinrroy/skyward-for-haotian?label=license&color=4c8ddf)](LICENSE)
-[![status](https://img.shields.io/badge/status-public_beta-8ea9f1)](https://github.com/Rinrroy/skyward-for-haotian/releases)
-[![device](https://img.shields.io/badge/device-Xiaomi_15_Pro_(haotian)-555555)](#skyward-for-the-xiaomi-15-pro)
-[![stars](https://img.shields.io/github/stars/Rinrroy/skyward-for-haotian?style=flat&label=stars&color=4c8ddf)](https://github.com/Rinrroy/skyward-for-haotian/stargazers)
-[![downloads](https://img.shields.io/github/downloads/Rinrroy/skyward-for-haotian/total?style=flat&label=downloads&color=4c8ddf)](https://github.com/Rinrroy/skyward-for-haotian/releases)
+[![version](https://img.shields.io/github/v/release/zhouzt0121/skyward-for-xuanyuan?display_name=tag&label=version&color=4c8ddf)](https://github.com/zhouzt0121/skyward-for-xuanyuan/releases/latest)
+[![CI](https://img.shields.io/github/actions/workflow/status/zhouzt0121/skyward-for-xuanyuan/build-xuanyuan.yml?branch=main&label=CI)](https://github.com/zhouzt0121/skyward-for-xuanyuan/actions/workflows/build-xuanyuan.yml)
+[![license](https://img.shields.io/github/license/zhouzt0121/skyward-for-xuanyuan?label=license&color=4c8ddf)](LICENSE)
+[![status](https://img.shields.io/badge/status-public_beta-8ea9f1)](https://github.com/zhouzt0121/skyward-for-xuanyuan/releases)
+[![device](https://img.shields.io/badge/device-Xiaomi_15_Ultra_(xuanyuan)-555555)](#skyward-for-the-xiaomi-15-pro)
+[![stars](https://img.shields.io/github/stars/zhouzt0121/skyward-for-xuanyuan?style=flat&label=stars&color=4c8ddf)](https://github.com/zhouzt0121/skyward-for-xuanyuan/stargazers)
+[![downloads](https://img.shields.io/github/downloads/zhouzt0121/skyward-for-xuanyuan/total?style=flat&label=downloads&color=4c8ddf)](https://github.com/zhouzt0121/skyward-for-xuanyuan/releases)
 
 Skyward is a recovery written in Rust, from scratch. This fork is built for one
-phone: **Xiaomi 15 Pro (`haotian`)**, on the Chinese system's OS4.0.0.19.
+phone: **Xiaomi 15 Ultra (`xuanyuan`)**, on the Chinese system's OS4.0.4.0.XOACNXM.
 
 <p align="center">
   <img src="assets/home.png" width="30%" alt="Home">
@@ -60,7 +60,7 @@ phone is restarted after one is flashed.
 ![Update the system and Skyward online](slides/en/out/05-updates.png)
 
 Skyward's own updates come from the newest release in
-[this repository](https://github.com/Rinrroy/skyward-for-haotian/releases), as
+[this repository](https://github.com/zhouzt0121/skyward-for-xuanyuan/releases), as
 the image itself rather than a zip.
 
 A download can be paused and continued, and a package already downloaded can be
@@ -147,7 +147,7 @@ this slot. There is no override.
 ## What this fork adds to upstream
 
 Upstream Skyward is a multi-device recovery. This fork keeps its own
-`devices/haotian.toml` only, and adds what this phone's hardware turned out to
+`devices/xuanyuan.toml` only, and adds what this phone's hardware turned out to
 need:
 
 - **The weaver answers, so a data partition that is only weaver-bound opens.**
@@ -187,7 +187,7 @@ need:
 
 | Device | Codename | Built on | Tested |
 | --- | --- | --- | --- |
-| Xiaomi 15 Pro | `haotian` | OS4.0.0.19.XOBCNXM (Android 17) | yes |
+| Xiaomi 15 Ultra | `xuanyuan` | OS4.0.4.0.XOACNXM (Android 17) | yes |
 
 ### Not implemented
 
@@ -196,14 +196,14 @@ need:
 - Incremental update packages
 - Update packages for phones without A/B slots
 
-## Notes on the Xiaomi 15 Pro
+## Notes on the Xiaomi 15 Ultra
 
 These have been tried on the phone and work: the screen (including its subpixel
 rendering, which this panel leaves to the display controller), the touchscreen,
 adb and fastbootd, MTP, the motor, WLAN, and decrypting the data partition with
 the screen lock's credential.
 
-The stock build the image is made on is OS4.0.0.19.XOBCNXM.
+The stock build the image is made on is OS4.0.4.0.XOACNXM.
 
 ### If decryption still fails
 
@@ -234,13 +234,13 @@ otherwise.
 ## Installing Skyward
 
 Skyward needs an unlocked bootloader. Download the image from
-[Releases](https://github.com/Rinrroy/skyward-for-haotian/releases), check it
+[Releases](https://github.com/zhouzt0121/skyward-for-xuanyuan/releases), check it
 against `SHA256SUMS`, and flash it to the recovery partition of the slot the
 phone runs from, with the phone in fastboot mode:
 
 ```sh
 sha256sum --check SHA256SUMS
-fastboot flash recovery skyward-v0.2.4-haotian-OS4.0.0.19.XOBCNXM.img
+fastboot flash recovery skyward-v1.0.1-xuanyuan-OS4.0.4.0.XOACNXM.img
 fastboot reboot recovery
 ```
 
@@ -249,11 +249,11 @@ repository**, on the Skyward update page in Settings; a newer image also install
 from its own Install page. With **Flash Skyward again** on, a system update or
 zip that writes over the recovery partitions gets Skyward back in them.
 
-The update page asks `api.github.com/repos/Rinrroy/skyward-for-haotian` for its
-newest release, and takes the asset named `skyward-<tag>-haotian-<stock>.img` —
+The update page asks `api.github.com/repos/zhouzt0121/skyward-for-xuanyuan` for its
+newest release, and takes the asset named `skyward-<tag>-xuanyuan-<stock>.img` —
 the image itself, published as it is rather than zipped. A fork of this fork has
 to change `skyward_net::github::LATEST` to its own repository, or the phone will
-be offered images built for `haotian` that it cannot use.
+be offered images built for `xuanyuan` that it cannot use.
 
 Without a system in super, Skyward still starts, with its screen and keys, adb,
 `adb sideload` and fastbootd, enough to install one. Touch, WLAN and decryption
@@ -336,18 +336,18 @@ package on Xiaomi's server, reading only the part of the package the partition
 is in, and checks its SHA-256 against the device file:
 
 ```sh
-target/release/skyward-pack stock --config devices/haotian.toml --out target/stock/haotian/recovery.img
-target/release/skyward-pack stock --config devices/haotian.toml --out target/stock/haotian/recovery.img --partition odm
+target/release/skyward-pack stock --config devices/xuanyuan.toml --out target/stock/xuanyuan/recovery.img
+target/release/skyward-pack stock --config devices/xuanyuan.toml --out target/stock/xuanyuan/recovery.img --partition odm
 ```
 
 Then it builds the image on top of it:
 
 ```sh
 target/release/skyward-pack recovery \
-  --stock target/stock/haotian/recovery.img \
+  --stock target/stock/xuanyuan/recovery.img \
   --binary target/aarch64-linux-android/release/skyward \
   --system-init target/system-init/aarch64-linux-android/release/system-init \
-  --config devices/haotian.toml \
+  --config devices/xuanyuan.toml \
   --font resources/fonts/MiSansVF.ttf \
   --mono resources/fonts/KirkMono-Regular.ttf \
   --mono-license resources/fonts/KirkMono-OFL.txt \
@@ -358,12 +358,12 @@ target/release/skyward-pack recovery \
   --firmware cs40l26-dbc.bin=stock/firmware/cs40l26-dbc.bin \
   --firmware cs40l26-a2h.bin=stock/firmware/cs40l26-a2h.bin \
   --omapi resources/omapi \
-  --out target/skyward-haotian.img
+  --out target/skyward-xuanyuan.img
 ```
 
 The motor's firmware has to be in the ramdisk before init's first probe, and
 `--omapi` puts in the OMAPI service the Thales weaver reaches the secure element
-through. `.github/workflows/build-haotian.yml` does all of this on a tag and
+through. `.github/workflows/build-xuanyuan.yml` does all of this on a tag and
 publishes the image with its checksum.
 
 Tests and lints run on the computer; what runs only on the phone is linted for
