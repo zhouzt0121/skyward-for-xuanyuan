@@ -10,7 +10,6 @@ permissions:
 
 jobs:
   remove-asset:
-    if: github.event.head_commit.message == 'chore: remove SHA256SUMS from v1.0.1 release'
     runs-on: ubuntu-latest
     steps:
       - name: Delete SHA256SUMS release asset
