@@ -1,0 +1,20 @@
+name: Remove SHA256SUMS from v1.0.1
+
+on:
+  push:
+    branches:
+      - main
+
+permissions:
+  contents: write
+
+jobs:
+  remove-asset:
+    if: github.event.head_commit.message == 'chore: remove SHA256SUMS from v1.0.1 release'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Delete SHA256SUMS release asset
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_REPO: ${{ github.repository }}
+        run: gh release delete-asset v1.0.1 SHA256SUMS --repo "$GH_REPO" --yes
