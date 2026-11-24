@@ -8,7 +8,7 @@
 [![CI](https://img.shields.io/github/actions/workflow/status/zhouzt0121/skyward-for-xuanyuan/build-xuanyuan.yml?branch=main&label=CI)](https://github.com/zhouzt0121/skyward-for-xuanyuan/actions/workflows/build-xuanyuan.yml)
 [![license](https://img.shields.io/github/license/zhouzt0121/skyward-for-xuanyuan?label=license&color=4c8ddf)](LICENSE)
 [![status](https://img.shields.io/badge/status-公开测试-8ea9f1)](https://github.com/zhouzt0121/skyward-for-xuanyuan/releases)
-[![device](https://img.shields.io/badge/设备-Xiaomi_15_Ultra_(xuanyuan)-555555)](#skyward-是使用-rust-编写的-recovery)
+[![device](https://img.shields.io/badge/设备-Xiaomi_15_Ultra_(xuanyuan)-555555)](#skyward-for-the-xiaomi-15-ultra)
 [![stars](https://img.shields.io/github/stars/zhouzt0121/skyward-for-xuanyuan?style=flat&label=stars&color=4c8ddf)](https://github.com/zhouzt0121/skyward-for-xuanyuan/stargazers)
 [![downloads](https://img.shields.io/github/downloads/zhouzt0121/skyward-for-xuanyuan/total?style=flat&label=下载量&color=4c8ddf)](https://github.com/zhouzt0121/skyward-for-xuanyuan/releases)
 
